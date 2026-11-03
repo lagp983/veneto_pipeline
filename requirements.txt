@@ -1,0 +1,5 @@
+pandas
+python-bcb
+yfinance
+streamlit
+sqlite
