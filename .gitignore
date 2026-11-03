@@ -6,12 +6,3 @@ __pycache__/
 venv/
 .venv/
 env/
-
-# Ignorar os dados gerados pelo pipeline
-data/*.sqlite
-data/*.db
-data/*.csv
-data/*.parquet
-
-# Mas NÃO ignorar o arquivo .gitkeep (explicado abaixo)
-!data/.gitkeep
