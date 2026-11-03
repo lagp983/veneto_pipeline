@@ -102,6 +102,10 @@ def _normalize_dates(index: pd.Index) -> pd.Series:
             raise ValueError(
                 "O índice da série CDI não é interpretável como data."
             ) from exc
+    if index.isna().any():
+        raise ValueError(
+            "O índice da série CDI contém datas inválidas (NaT)."
+        )
     if index.tz is not None:
         index = index.tz_localize(None)
     return pd.Series(index.normalize().astype("datetime64[ns]"))
