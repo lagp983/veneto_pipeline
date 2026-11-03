@@ -39,6 +39,10 @@ def extract_cdi(start, end) -> pd.DataFrame:
 
     values = _cdi_raw_values(raw)
     median = float(values.median())
+    if median <= 0:
+    raise ValueError(
+        "Mediana inválida para CDI diário (% a.d.)."
+    )
     if median > CDI_MAX_MEDIAN_PCT_DAY:
         raise ValueError(
             "Unidade errada na série CDI (SGS 12): esperado % a.d. "
