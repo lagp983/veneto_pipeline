@@ -1,8 +1,13 @@
-# Python
+#ignore
 __pycache__/
 *.py[cod]
 
-# Ambientes Virtuais
 venv/
 .venv/
 env/
+
+data/*.sqlite
+data/*.csv
+
+#not ignore
+!data/.gitkeep
