@@ -11,7 +11,7 @@ REQUISITOS
  Usar python-bcb (não requests cru).
 
 Criterio
-  Rodar sem erro para 2021-11-01 a 2026-11-01 sem erro
+  Rodar sem erro para ultimos 5 anos
 
 RESTRIÇOES
  Nao inventar codigo SGS. Se a serie 12 nao for a diaria usada, interrompa a açao atual e avise.

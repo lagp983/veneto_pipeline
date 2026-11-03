@@ -39,8 +39,7 @@ from .config import (
     COL_CDI_PCT_YEAR,
     COL_DATE,
     DB_PATH,
-    DEFAULT_END,
-    DEFAULT_START,
+    default_window,
 )
 from .extract import extract_cdi
 from .load import CDI_COLUMNS, load_cdi
@@ -142,14 +141,20 @@ class _StageFailed(Exception):
 
 
 def run_pipeline(
-    start: str = DEFAULT_START,
-    end: str = DEFAULT_END,
+    start: str | None = None,
+    end: str | None = None,
     db_path: Path | str = DB_PATH,
     csv_path: Path | str = CDI_CSV_PATH,
     table: str = CDI_TABLE,
     extract_fn: Callable[[str, str], pd.DataFrame] = extract_cdi,
 ) -> PipelineReport:
-    """Executa a pipeline completa e devolve o relatório (não levanta por falha de etapa)."""
+    """Executa a pipeline completa e devolve o relatório (não levanta por falha de etapa).
+
+    Sem ``start``/``end``, usa os últimos ``LOOKBACK_YEARS`` anos até hoje.
+    """
+    default_start, default_end = default_window()
+    start = start or default_start
+    end = end or default_end
     report = PipelineReport(start, end, Path(db_path), Path(csv_path), table)
     try:
         raw = _stage(
@@ -376,19 +381,26 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m src.pipeline",
         description="Pipeline do CDI (SGS 12): extract, transform, load e relatório de validação.",
     )
-    parser.add_argument("--start", default=DEFAULT_START, help="data inicial (YYYY-MM-DD)")
-    parser.add_argument("--end", default=DEFAULT_END, help="data final (YYYY-MM-DD)")
+    parser.add_argument(
+        "--start",
+        help="data inicial (YYYY-MM-DD); padrão: 5 anos antes de --end",
+    )
+    parser.add_argument(
+        "--end", help="data final (YYYY-MM-DD); padrão: hoje (fuso de Brasília)"
+    )
     parser.add_argument("--db", default=str(DB_PATH), help="arquivo SQLite de saída")
     parser.add_argument("--csv", default=str(CDI_CSV_PATH), help="arquivo CSV de saída")
     args = parser.parse_args(argv)
 
     try:
-        if pd.Timestamp(args.start) >= pd.Timestamp(args.end):
+        end = args.end or default_window()[1]
+        start = args.start or default_window(pd.Timestamp(end).date())[0]
+        if pd.Timestamp(start) >= pd.Timestamp(end):
             parser.error("--start deve ser anterior a --end")
     except ValueError:
         parser.error("--start/--end devem estar no formato YYYY-MM-DD")
 
-    report = run_pipeline(args.start, args.end, args.db, args.csv)
+    report = run_pipeline(start, end, args.db, args.csv)
     print(report.render())
     return report.exit_code
 
