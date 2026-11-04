@@ -15,13 +15,15 @@ PTAX_SGS_COLUMN = "ptax"
 SERIES_CDI = "cdi"
 SERIES_PTAX = "ptax"
 SERIES_IPCA = "ipca"
+SERIES_IBOV = "ibov"                                   # ← novo
 SERIES_ALL = "all"
-SERIES_CHOICES = (SERIES_CDI, SERIES_PTAX, SERIES_IPCA, SERIES_ALL)
+SERIES_CHOICES = (SERIES_CDI, SERIES_PTAX, SERIES_IPCA, SERIES_IBOV, SERIES_ALL)
 DEFAULT_SERIES = SERIES_ALL
 # Janela móvel: os últimos N anos, terminando hoje (fuso de Brasília).
 LOOKBACK_YEARS = 5
 MARKET_TIMEZONE = "America/Sao_Paulo"
-
+SGS_TIMEOUT_SECONDS = 120
+CDI_MAX_MEDIAN_PCT_DAY = 1.0
 
 def _today_local() -> date:
     """Data de hoje no fuso do mercado; cai para a data do sistema sem tzdata."""
@@ -104,3 +106,29 @@ IPCA_PCT_12M_BOUNDS = (-10.0, 30.0)             # % acumulado 12m
 IPCA_MIN_MONTHLY_COVERAGE = 0.98                # quase 100% (não há “feriados” mensais)
 IPCA_MAX_GAP_MONTHS = 2                         # buraco máximo tolerado (em meses)
 IPCA_EDGE_TOLERANCE_MONTHS = 1
+
+# --- IBOVESPA (yfinance ^BVSP) ---
+# Índice da B3 obtido via yfinance (Yahoo Finance). Fonte distinta do SGS/BCB,
+# mas a estrutura canônica espelha o PTAX: preço de fechamento + variação
+# diária simples (%). O yfinance é importado de forma lazy em `extract.py`,
+# então quem não usa `--series ibov` não precisa da dependência instalada.
+IBOV_TICKER = "^BVSP"                    # símbolo no Yahoo Finance
+IBOV_COLUMN = "ibov"                     # nome interno após rename de "Close"
+IBOV_TABLE = "ibov"
+IBOV_CSV_PATH = DATA_DIR / "ibov.csv"
+IBOV_TZ = "America/Sao_Paulo"            # fuso do pregão (evita shift UTC→local)
+IBOV_YF_TIMEOUT = 120                    # alinhado a SGS_TIMEOUT_SECONDS
+
+# Colunas canônicas após o transform (mesma convenção do PTAX).
+COL_IBOV_CLOSE = "ibov_close"            # pontos do índice (Close), float
+COL_IBOV_RET_DAY = "ibov_ret_day"        # variação simples (%) vs. obs. anterior
+
+# Limites de plausibilidade (pontos do índice). Histórico recente: ~15k (2016)
+# a ~170k (2024/2025). A faixa "típica" só gera AVISO; o FAIL em ±20% cobre
+# com folga o pior dia histórico (~-12% em 1998 e 2020).
+IBOV_MEDIAN_RANGE = (10_000.0, 500_000.0)        # extract: mediana fora disso = série/unidade errada
+IBOV_PRICE_BOUNDS_EXCLUSIVE = (0.0, 500_000.0)   # transform: fora de (0, 500k) = erro
+IBOV_TYPICAL_RANGE = (30_000.0, 250_000.0)       # validação: fora disso = aviso (a calibrar)
+IBOV_RET_WARN_ABS_PCT = 8.0                      # |variação diária| acima disso = aviso
+IBOV_RET_FAIL_ABS_PCT = 20.0                     # |variação diária| acima disso = falha
+IBOV_MIN_ROWS = 2                                # mínimo p/ calcular o retorno diário

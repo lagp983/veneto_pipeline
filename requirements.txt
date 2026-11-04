@@ -2,3 +2,4 @@ pandas
 python-bcb
 yfinance
 streamlit
+yfinance>=0.2.40
