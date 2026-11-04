@@ -1,11 +1,13 @@
-"""Transformação das séries (CDI, PTAX e IPCA): colunas canônicas e derivados.
+"""Transformação das séries (CDI, PTAX, IPCA e IBOV): colunas canônicas e derivados.
 
 - CDI: fator diário e anualização em 252 dias úteis.
 - PTAX: variação diária (simples, %).
 - IPCA: fator mensal e acumulado em 12 meses.
+- IBOV: variação diária (simples, %) sobre o fechamento (pontos do índice).
 
 Não baixa dados, não grava e não preenche observações ausentes.
 """
+
 
 from __future__ import annotations
 
@@ -19,11 +21,17 @@ from .config import (
     COL_CDI_PCT_DAY,
     COL_CDI_PCT_YEAR,
     COL_DATE,
+    COL_IBOV_CLOSE,
+    COL_IBOV_RET_DAY,
     COL_IPCA_FACTOR_MONTH,
     COL_IPCA_PCT_12M,
     COL_IPCA_PCT_MONTH,
     COL_PTAX_RET_DAY,
     COL_PTAX_VENDA,
+    IBOV_COLUMN,
+    IBOV_MIN_ROWS,
+    IBOV_PRICE_BOUNDS_EXCLUSIVE,
+    IBOV_TICKER,
     IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE,
     IPCA_SGS_CODE,
     IPCA_SGS_COLUMN,
@@ -92,9 +100,14 @@ def transform_cdi(raw: pd.DataFrame) -> pd.DataFrame:
 def _extract_values(
     raw: pd.DataFrame,
     column: str = CDI_SGS_COLUMN,
-    code: int = CDI_SGS_CODE,
+    code: int | str = CDI_SGS_CODE,
     label: str = "CDI",
 ) -> pd.Series:
+    """Localiza a coluna de valor, converte para número e descarta NaN.
+
+    Os padrões são os do CDI; PTAX, IPCA e IBOV passam a sua coluna, código
+    (ou ticker, no IBOV) e rótulo.
+    """
     """Localiza a coluna de valor, converte para número e descarta NaN.
 
     Os padrões são os do CDI; o PTAX e o IPCA passam a sua coluna, código e rótulo.
@@ -295,4 +308,73 @@ def _check_ipca_pct_month_range(pct_month: pd.Series) -> None:
             f"({low:g} < x < {high:g}): "
             f"{int(bad.sum())} valor(es), min={pct_month.min():.4g}, "
             f"max={pct_month.max():.4g}."
+        )
+
+def transform_ibov(raw: pd.DataFrame) -> pd.DataFrame:
+    """Converte a série bruta do IBOVESPA (``^BVSP``) na tabela canônica.
+
+    Colunas devolvidas, nesta ordem:
+
+    - ``date``: ``datetime64[ns]``, sem fuso, ordenada e sem duplicatas.
+    - ``ibov_close``: pontos do índice no fechamento (``Close``), ``float64``.
+    - ``ibov_ret_day``: variação simples em %, ``(p_t / p_{t-1} - 1) * 100``,
+      entre observações consecutivas, ``float64``.
+
+    Só as datas presentes na entrada entram na conta: não reindexa, não
+    preenche dias sem pregão e não interpola. A variação de segunda contra
+    sexta atravessa o fim de semana (e feriados); a de um pregão após um
+    feriado acumula o período. A primeira observação não tem variação e é
+    descartada, então a saída tem uma linha a menos que a entrada válida e
+    nenhum valor nulo. Linhas sem valor numérico são descartadas antes do
+    cálculo.
+
+    Raises
+    ------
+    ValueError
+        Entrada vazia; coluna de valor não encontrada; índice que não seja
+        data; datas duplicadas; fechamento fora de ``IBOV_PRICE_BOUNDS_EXCLUSIVE``;
+        ou menos de ``IBOV_MIN_ROWS`` observações válidas.
+    """
+    if raw is None or raw.empty:
+        raise ValueError("transform_ibov recebeu um DataFrame vazio.")
+
+    values = _extract_values(raw, IBOV_COLUMN, IBOV_TICKER, "IBOV")
+    dates = _normalize_dates(values.index, "série IBOV")
+
+    df = pd.DataFrame(
+        {
+            COL_DATE: dates,
+            COL_IBOV_CLOSE: values.to_numpy(dtype="float64"),
+        }
+    )
+
+    if df[COL_DATE].duplicated().any():
+        dups = df.loc[df[COL_DATE].duplicated(), COL_DATE].dt.date.tolist()[:5]
+        raise ValueError(f"Datas duplicadas na série IBOV (ex.: {dups}).")
+
+    _check_ibov_price_range(df[COL_IBOV_CLOSE])
+
+    df = df.sort_values(COL_DATE, kind="stable").reset_index(drop=True)
+    if len(df) < IBOV_MIN_ROWS:
+        raise ValueError(
+            f"IBOV precisa de pelo menos {IBOV_MIN_ROWS} observações válidas "
+            f"para calcular a variação diária; recebidas {len(df)}."
+        )
+
+    df[COL_IBOV_RET_DAY] = (
+        df[COL_IBOV_CLOSE] / df[COL_IBOV_CLOSE].shift(1) - 1.0
+    ) * 100.0
+    df = df.iloc[1:].reset_index(drop=True)  # 1ª observação não tem variação
+
+    return df[[COL_DATE, COL_IBOV_CLOSE, COL_IBOV_RET_DAY]]
+
+def _check_ibov_price_range(price: pd.Series) -> None:
+    low, high = IBOV_PRICE_BOUNDS_EXCLUSIVE
+    bad = (price <= low) | (price >= high)
+    if bad.any():
+        raise ValueError(
+            f"IBOV fora do intervalo esperado para pontos do índice "
+            f"({low:g} < x < {high:g}): "
+            f"{int(bad.sum())} valor(es), min={price.min():.4g}, "
+            f"max={price.max():.4g}."
         )
