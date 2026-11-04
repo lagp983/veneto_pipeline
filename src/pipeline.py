@@ -1,10 +1,10 @@
-"""Orquestração da pipeline (CDI e PTAX): extract -> transform -> load, com relatório.
+"""Orquestração da pipeline (CDI, PTAX e IPCA): extract -> transform -> load, com relatório.
 
 Uso (a partir da raiz do repositório)::
 
     python -m src.pipeline                      # todas as séries (padrão)
     python -m src.pipeline --series ptax
-    python -m src.pipeline --series cdi --start 2021-11-01 --end 2026-11-01
+    python -m src.pipeline --series ipca --start 2021-11-01 --end 2026-11-01
 
 Fluxo, por série (cada série roda de forma independente):
     1. extract   (SGS via python-bcb)
@@ -13,7 +13,8 @@ Fluxo, por série (cada série roda de forma independente):
     4. load      (SQLite replace + CSV) -- pulado se a validação dos dados falhar,
        para não sobrescrever saídas boas com dados ruins
     5. validação das saídas (relê SQLite e CSV e compara com o DataFrame)
-Com mais de uma série, ainda há a checagem cruzada de sobreposição de datas.
+Com CDI e PTAX presentes, ainda há a checagem cruzada de sobreposição de datas
+(só entre as duas séries diárias; o IPCA é mensal e não entra nessa checagem).
 
 Códigos de saída: 0 aprovado (avisos permitidos), 1 validação reprovada,
 2 falha em uma etapa (extract/transform/load) de alguma série.
@@ -48,18 +49,34 @@ from .config import (
     COL_DATE,  # noqa: F401
     DB_PATH,
     DEFAULT_SERIES,
+    IPCA_CSV_PATH,
+    IPCA_SGS_CODE,
+    IPCA_TABLE,
     PTAX_CSV_PATH,
     PTAX_SGS_CODE,
     PTAX_TABLE,
     SERIES_ALL,
     SERIES_CDI,
     SERIES_CHOICES,
+    SERIES_IPCA,
     SERIES_PTAX,
     default_window,
 )
-from .extract import extract_cdi, extract_ptax
-from .load import CDI_COLUMNS, PTAX_COLUMNS, load_cdi, load_ptax
-from .transform import BUSINESS_DAYS_PER_YEAR, transform_cdi, transform_ptax  # noqa: F401
+from .extract import extract_cdi, extract_ipca, extract_ptax
+from .load import (
+    CDI_COLUMNS,
+    IPCA_COLUMNS,
+    PTAX_COLUMNS,
+    load_cdi,
+    load_ipca,
+    load_ptax,
+)
+from .transform import (  # noqa: F401 - BUSINESS_DAYS_PER_YEAR reexportado (API anterior)
+    BUSINESS_DAYS_PER_YEAR,
+    transform_cdi,
+    transform_ipca,
+    transform_ptax,
+)
 from .validate import (  # noqa: F401 - limites e helpers reexportados (API anterior)
     EDGE_TOLERANCE_DAYS,
     FAIL,
@@ -74,9 +91,11 @@ from .validate import (  # noqa: F401 - limites e helpers reexportados (API ante
     Check,
     _check,
     summarize_cdi,
+    summarize_ipca,
     summarize_ptax,
     validate_cdi,
     validate_date_overlap,
+    validate_ipca,
     validate_ptax,
 )
 from .validate import _same as _same_columns
@@ -125,6 +144,18 @@ SERIES: dict[str, SeriesSpec] = {
         columns=PTAX_COLUMNS,
         table=PTAX_TABLE,
         csv_path=PTAX_CSV_PATH,
+    ),
+    SERIES_IPCA: SeriesSpec(
+        name=SERIES_IPCA,
+        title=f"Pipeline IPCA (SGS {IPCA_SGS_CODE})",
+        extract=extract_ipca,
+        transform=transform_ipca,
+        validate=validate_ipca,
+        summarize=summarize_ipca,
+        load=load_ipca,
+        columns=IPCA_COLUMNS,
+        table=IPCA_TABLE,
+        csv_path=IPCA_CSV_PATH,
     ),
 }
 
@@ -263,8 +294,8 @@ def run_pipeline(
     """Executa a pipeline do CDI e devolve o relatório (não levanta por falha de etapa).
 
     Mesma assinatura e comportamento da versão anterior. Sem ``start``/``end``,
-    usa os últimos ``LOOKBACK_YEARS`` anos até hoje. Para PTAX ou várias séries,
-    use ``run_series`` / ``run_all``.
+    usa os últimos ``LOOKBACK_YEARS`` anos até hoje. Para PTAX, IPCA ou várias
+    séries, use ``run_series`` / ``run_all``.
     """
     return run_series(SERIES[SERIES_CDI], start, end, db_path, csv_path, table, extract_fn)
 
@@ -334,9 +365,15 @@ def run_all(
 ) -> PipelineRun:
     """Executa uma série ou todas (``series="all"``), cada uma de forma independente.
 
-    ``csv_paths`` troca o CSV de cada série (chave: ``"cdi"``/``"ptax"``); sem
-    ele, usa os caminhos do ``config.py``. ``extract_fns`` troca a extração por
+    ``csv_paths`` troca o CSV de cada série (chave: ``"cdi"``/``"ptax"``/``"ipca"``);
+    sem ele, usa os caminhos do ``config.py``. ``extract_fns`` troca a extração por
     série (testes). Todas as séries usam a mesma janela.
+
+    A checagem cruzada de sobreposição de datas só ocorre entre CDI e PTAX
+    (séries diárias); o IPCA, por ser mensal, não é comparado por data com as
+    demais. Ela é executada sempre que ambos os relatórios estiverem presentes,
+    independentemente de a chamada ser ``series="all"`` ou uma combinação que
+    inclua os dois.
     """
     if series not in SERIES_CHOICES:
         raise ValueError(f"Série desconhecida: {series!r}. Opções: {SERIES_CHOICES}.")
@@ -355,8 +392,11 @@ def run_all(
     ]
 
     run = PipelineRun(reports)
-    if len(reports) == 2:
-        run.cross_checks.append(_overlap_check(reports[0], reports[1]))
+    by_name = {spec.name: report for spec, report in zip(specs, reports)}
+    if SERIES_CDI in by_name and SERIES_PTAX in by_name:
+        run.cross_checks.append(
+            _overlap_check(by_name[SERIES_CDI], by_name[SERIES_PTAX])
+        )
     return run
 
 
@@ -421,7 +461,10 @@ def _same(stored: pd.DataFrame, df: pd.DataFrame) -> tuple[bool, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.pipeline",
-        description="Pipeline CDI e PTAX: extract, transform, load e relatório de validação.",
+        description=(
+            "Pipeline CDI, PTAX e IPCA: extract, transform, load "
+            "e relatório de validação."
+        ),
     )
     parser.add_argument(
         "--series", choices=SERIES_CHOICES, default=DEFAULT_SERIES,
@@ -441,6 +484,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ptax-csv", default=str(PTAX_CSV_PATH), help="arquivo CSV de saída do PTAX"
     )
+    parser.add_argument(
+        "--ipca-csv", default=str(IPCA_CSV_PATH), help="arquivo CSV de saída do IPCA"
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -453,7 +499,11 @@ def main(argv: list[str] | None = None) -> int:
 
     run = run_all(
         args.series, start, end, args.db,
-        {SERIES_CDI: args.csv, SERIES_PTAX: args.ptax_csv},
+        {
+            SERIES_CDI: args.csv,
+            SERIES_PTAX: args.ptax_csv,
+            SERIES_IPCA: args.ipca_csv,
+        },
     )
     print(run.render())
     return run.exit_code
