@@ -82,7 +82,9 @@ DATA_DIR = REPO_ROOT / "data"
 DB_PATH = DATA_DIR / "market.sqlite"
 CDI_CSV_PATH = DATA_DIR / "cdi.csv"
 PTAX_CSV_PATH = DATA_DIR / "ptax.csv"
-
+MIN_BUSINESS_DAY_COVERAGE = 0.90  # feriados nacionais ficam em ~96%
+EDGE_TOLERANCE_DAYS = 5
+MAX_GAP_DAYS = 7
 # --- IPCA (SGS 433) ---
 IPCA_SGS_CODE = 433
 IPCA_SGS_COLUMN = "ipca"
