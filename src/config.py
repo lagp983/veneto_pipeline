@@ -82,3 +82,21 @@ DATA_DIR = REPO_ROOT / "data"
 DB_PATH = DATA_DIR / "market.sqlite"
 CDI_CSV_PATH = DATA_DIR / "cdi.csv"
 PTAX_CSV_PATH = DATA_DIR / "ptax.csv"
+
+# --- IPCA (SGS 433) ---
+IPCA_SGS_CODE = 433
+IPCA_SGS_COLUMN = "ipca"
+IPCA_TABLE = "ipca"
+IPCA_CSV_PATH = DATA_DIR / "ipca.csv"
+
+COL_IPCA_PCT_MONTH = "ipca_pct_month"       # variação % mensal (pode ser negativa)
+COL_IPCA_FACTOR_MONTH = "ipca_factor_month" # 1 + pct_month / 100
+COL_IPCA_PCT_12M = "ipca_pct_12m"           # acumulado em 12 meses (produto dos fatores)
+
+# Limites de plausibilidade (valores mensais do IPCA raramente saem de (-3%, +3%),
+# mas a série histórica tem eventos extremos; adotar faixa conservadora).
+IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE = (-5.0, 5.0)   # % a.m.
+IPCA_MEDIAN_RANGE = (-1.0, 2.0)                 # mediana histórica ~0,3–0,5%
+IPCA_PCT_12M_BOUNDS = (-10.0, 30.0)             # % acumulado 12m
+IPCA_MIN_MONTHLY_COVERAGE = 0.98                # quase 100% (não há “feriados” mensais)
+IPCA_MAX_GAP_MONTHS = 2                         # buraco máximo tolerado (em meses)
