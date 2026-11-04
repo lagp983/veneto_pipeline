@@ -1,61 +1,50 @@
-"""Orquestração da pipeline do CDI: extract -> transform -> load, com relatório.
+"""Verificações de qualidade das séries (CDI, PTAX), da carga e entre séries.
 
-Uso (a partir da raiz do repositório)::
+Cada verificação devolve um ``Check`` com status OK, AVISO ou FALHA. Só FALHA
+reprova a pipeline; AVISO é informativo.
 
-    python -m src.pipeline
-    python -m src.pipeline --start 2021-11-01 --end 2026-11-01
-
-Fluxo:
-    1. extract   (SGS 12 via python-bcb)
-    2. transform (colunas canônicas, fator diário, anualização 252)
-    3. validação dos dados (antes de gravar)
-    4. load      (SQLite replace + CSV) -- pulado se a validação dos dados falhar,
-       para não sobrescrever saídas boas com dados ruins
-    5. validação das saídas (relê SQLite e CSV e compara com o DataFrame)
-
-Códigos de saída: 0 aprovado (avisos permitidos), 1 validação reprovada,
-2 falha em uma etapa (extract/transform/load).
+- ``daily_checks``: comuns a qualquer série diária (datas, cobertura, estrutura).
+- ``validate_cdi`` / ``validate_ptax``: ``daily_checks`` + regras de cada série.
+- ``validate_persisted``: relê SQLite e CSV e compara com o DataFrame gravado.
+- ``validate_date_overlap``: sobreposição de datas entre duas séries.
 """
 
 from __future__ import annotations
 
-import argparse
 import sqlite3
-import sys
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TypeVar
 
 import numpy as np
 import pandas as pd
 
 from .config import (
-    CDI_CSV_PATH,
-    CDI_SGS_CODE,
-    CDI_TABLE,
     COL_CDI_FACTOR_DAY,
     COL_CDI_PCT_DAY,
     COL_CDI_PCT_YEAR,
     COL_DATE,
-    DB_PATH,
-    default_window,
+    COL_PTAX_RET_DAY,
+    COL_PTAX_VENDA,
+    MIN_DATE_OVERLAP,
+    PTAX_PRICE_BOUNDS_EXCLUSIVE,
+    PTAX_RET_FAIL_ABS_PCT,
+    PTAX_RET_WARN_ABS_PCT,
+    PTAX_TYPICAL_RANGE,
 )
-from .extract import extract_cdi
-from .load import CDI_COLUMNS, load_cdi
-from .transform import BUSINESS_DAYS_PER_YEAR, transform_cdi
+from .load import CDI_COLUMNS, PTAX_COLUMNS
+from .transform import BUSINESS_DAYS_PER_YEAR
 
 OK, WARN, FAIL, SKIPPED = "OK", "AVISO", "FALHA", "PULADO"
 
-# Faixas usadas só na validação (o transform já garante 0 < x < 1).
-TYPICAL_MEDIAN_PCT_DAY = (0.007, 0.06)
-PLAUSIBLE_PCT_YEAR = (5.0, 20.0)
+# Comuns às séries diárias.
 MIN_BUSINESS_DAY_COVERAGE = 0.90  # feriados nacionais ficam em ~96%
 EDGE_TOLERANCE_DAYS = 5
 MAX_GAP_DAYS = 7
 FLOAT_RTOL = 1e-12
 
-T = TypeVar("T")
+# Específicas do CDI (o transform já garante 0 < x < 1).
+TYPICAL_MEDIAN_PCT_DAY = (0.007, 0.06)
+PLAUSIBLE_PCT_YEAR = (5.0, 20.0)
 
 
 @dataclass(frozen=True)
@@ -65,170 +54,28 @@ class Check:
     detail: str = ""
 
 
-@dataclass(frozen=True)
-class Stage:
-    name: str
-    status: str
-    detail: str
-    seconds: float
-
-
-@dataclass
-class PipelineReport:
-    start: str
-    end: str
-    db_path: Path
-    csv_path: Path
-    table: str
-    stages: list[Stage] = field(default_factory=list)
-    checks: list[Check] = field(default_factory=list)
-    info: list[str] = field(default_factory=list)
-    stage_error: bool = False
-
-    @property
-    def n_failures(self) -> int:
-        return sum(c.status == FAIL for c in self.checks)
-
-    @property
-    def n_warnings(self) -> int:
-        return sum(c.status == WARN for c in self.checks)
-
-    @property
-    def exit_code(self) -> int:
-        if self.stage_error:
-            return 2
-        return 1 if self.n_failures else 0
-
-    def render(self) -> str:
-        lines = [
-            f"=== Pipeline CDI (SGS {CDI_SGS_CODE}) ===",
-            f"Janela pedida: {self.start} a {self.end}",
-            f"SQLite: {self.db_path} (tabela '{self.table}', replace)",
-            f"CSV:    {self.csv_path}",
-            "",
-            "Etapas",
-        ]
-        for s in self.stages:
-            lines.append(
-                f"  {f'[{s.status}]':<9} {s.name:<10} {s.detail} ({s.seconds:.1f}s)"
-            )
-        if self.checks:
-            lines += ["", "Validação"]
-            width = max(len(c.name) for c in self.checks)
-            for c in self.checks:
-                lines.append(f"  {f'[{c.status}]':<9} {c.name:<{width}}  {c.detail}")
-        if self.info:
-            lines += ["", "Resumo dos dados"]
-            lines += [f"  {i}" for i in self.info]
-
-        if self.stage_error:
-            verdict = "ERRO EM ETAPA"
-        elif self.n_failures:
-            verdict = "REPROVADO"
-        else:
-            verdict = "APROVADO"
-        lines += [
-            "",
-            f"RESULTADO: {verdict} "
-            f"({len(self.checks)} verificações, {self.n_failures} falha(s), "
-            f"{self.n_warnings} aviso(s))",
-        ]
-        return "\n".join(lines)
-
-
-class _StageFailed(Exception):
-    """Interrompe a pipeline depois de registrar a falha da etapa."""
-
-
-def run_pipeline(
-    start: str | None = None,
-    end: str | None = None,
-    db_path: Path | str = DB_PATH,
-    csv_path: Path | str = CDI_CSV_PATH,
-    table: str = CDI_TABLE,
-    extract_fn: Callable[[str, str], pd.DataFrame] = extract_cdi,
-) -> PipelineReport:
-    """Executa a pipeline completa e devolve o relatório (não levanta por falha de etapa).
-
-    Sem ``start``/``end``, usa os últimos ``LOOKBACK_YEARS`` anos até hoje.
-    """
-    default_start, default_end = default_window()
-    start = start or default_start
-    end = end or default_end
-    report = PipelineReport(start, end, Path(db_path), Path(csv_path), table)
-    try:
-        raw = _stage(
-            report, "extract", lambda: extract_fn(start, end),
-            lambda r: f"{len(r)} linhas brutas",
-        )
-        df = _stage(
-            report, "transform", lambda: transform_cdi(raw),
-            lambda d: f"{len(d)} linhas canônicas",
-        )
-
-        report.checks += validate_dataframe(df, start, end)
-        report.info += summarize(df)
-
-        if report.n_failures:
-            report.stages.append(
-                Stage("load", SKIPPED,
-                      "validação dos dados reprovada; saídas anteriores preservadas", 0.0)
-            )
-            return report
-
-        _stage(
-            report, "load",
-            lambda: load_cdi(df, report.db_path, report.csv_path, table),
-            lambda n: f"{n} linhas gravadas",
-        )
-        report.checks += validate_persisted(df, report.db_path, report.csv_path, table)
-    except _StageFailed:
-        report.stage_error = True
-    return report
-
-
-def _stage(
-    report: PipelineReport,
-    name: str,
-    fn: Callable[[], T],
-    describe: Callable[[T], str],
-) -> T:
-    t0 = time.perf_counter()
-    try:
-        result = fn()
-    except Exception as exc:  # noqa: BLE001 - qualquer falha vira relatório
-        report.stages.append(
-            Stage(name, FAIL, f"{type(exc).__name__}: {exc}", time.perf_counter() - t0)
-        )
-        raise _StageFailed from exc
-    report.stages.append(Stage(name, OK, describe(result), time.perf_counter() - t0))
-    return result
-
-
-# --------------------------------------------------------------------------
-# Validação dos dados (antes do load)
-# --------------------------------------------------------------------------
-
 def _check(name: str, ok: bool, detail: str, severity: str = FAIL) -> Check:
     return Check(name, OK if ok else severity, detail)
 
 
-def validate_dataframe(df: pd.DataFrame, start: str, end: str) -> list[Check]:
-    """Verificações sobre o DataFrame transformado."""
+# --------------------------------------------------------------------------
+# Comuns a séries diárias
+# --------------------------------------------------------------------------
+
+def daily_checks(
+    df: pd.DataFrame, columns: list[str], start: str, end: str
+) -> list[Check]:
+    """Estrutura, datas e cobertura de uma série diária de dias úteis."""
     if df is None or df.empty:
         return [Check("dados não vazios", FAIL, "DataFrame vazio")]
 
     d = df[COL_DATE]
-    pct = df[COL_CDI_PCT_DAY].to_numpy(dtype="float64")
-    factor = df[COL_CDI_FACTOR_DAY].to_numpy(dtype="float64")
-    year = df[COL_CDI_PCT_YEAR].to_numpy(dtype="float64")
     s, e = pd.Timestamp(start), pd.Timestamp(end)
     first, last = d.min(), d.max()
     checks: list[Check] = []
 
     checks.append(_check(
-        "colunas canônicas", list(df.columns) == CDI_COLUMNS,
-        ", ".join(df.columns),
+        "colunas canônicas", list(df.columns) == columns, ", ".join(df.columns),
     ))
     n_null = int(df.isna().sum().sum())
     checks.append(_check("sem valores nulos", n_null == 0, f"{n_null} nulo(s)"))
@@ -269,6 +116,22 @@ def validate_dataframe(df: pd.DataFrame, start: str, end: str) -> list[Check]:
         f"maior intervalo entre datas: {max_gap}d (limite {MAX_GAP_DAYS}d)",
         WARN,
     ))
+    return checks
+
+
+# --------------------------------------------------------------------------
+# CDI
+# --------------------------------------------------------------------------
+
+def validate_cdi(df: pd.DataFrame, start: str, end: str) -> list[Check]:
+    """Verificações sobre o DataFrame transformado do CDI."""
+    checks = daily_checks(df, CDI_COLUMNS, start, end)
+    if df is None or df.empty:
+        return checks
+
+    pct = df[COL_CDI_PCT_DAY].to_numpy(dtype="float64")
+    factor = df[COL_CDI_FACTOR_DAY].to_numpy(dtype="float64")
+    year = df[COL_CDI_PCT_YEAR].to_numpy(dtype="float64")
 
     checks.append(_check(
         "cdi_pct_day em (0, 1) % a.d.", bool((pct > 0).all() and (pct < 1).all()),
@@ -299,7 +162,7 @@ def validate_dataframe(df: pd.DataFrame, start: str, end: str) -> list[Check]:
     return checks
 
 
-def summarize(df: pd.DataFrame) -> list[str]:
+def summarize_cdi(df: pd.DataFrame) -> list[str]:
     if df is None or df.empty:
         return []
     d = df[COL_DATE]
@@ -316,11 +179,126 @@ def summarize(df: pd.DataFrame) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Validação das saídas (depois do load)
+# PTAX
+# --------------------------------------------------------------------------
+
+def validate_ptax(df: pd.DataFrame, start: str, end: str) -> list[Check]:
+    """Verificações sobre o DataFrame transformado do PTAX."""
+    checks = daily_checks(df, PTAX_COLUMNS, start, end)
+    if df is None or df.empty:
+        return checks
+
+    price = df[COL_PTAX_VENDA].to_numpy(dtype="float64")
+    ret = df[COL_PTAX_RET_DAY].to_numpy(dtype="float64")
+    dates = df[COL_DATE]
+
+    lo, hi = PTAX_PRICE_BOUNDS_EXCLUSIVE
+    checks.append(_check(
+        f"ptax_venda em ({lo:g}, {hi:g}) R$/US$",
+        bool((price > lo).all() and (price < hi).all()),
+        f"min={price.min():.4f}, max={price.max():.4f}",
+    ))
+    tlo, thi = PTAX_TYPICAL_RANGE
+    checks.append(_check(
+        "ptax_venda na faixa típica",
+        bool(tlo <= price.min() and price.max() <= thi),
+        f"{price.min():.4f} a {price.max():.4f} (típico {tlo:g} a {thi:g})",
+        WARN,
+    ))
+
+    # A 1ª linha depende da observação descartada e não pode ser recalculada.
+    ref = np.expm1(np.diff(np.log(np.where(price > 0, price, np.nan)))) * 100.0
+    checks.append(_check(
+        "variação diária = p_t / p_(t-1) - 1",
+        bool(np.allclose(ret[1:], ref, rtol=1e-9, atol=1e-12)),
+        "recalculada por log/expm1 (a 1ª linha fica fora: depende da observação descartada)",
+    ))
+
+    abs_ret = np.abs(ret)
+    i = int(abs_ret.argmax())
+    max_abs = float(abs_ret[i])
+    if max_abs > PTAX_RET_FAIL_ABS_PCT:
+        status = FAIL
+    elif max_abs > PTAX_RET_WARN_ABS_PCT:
+        status = WARN
+    else:
+        status = OK
+    checks.append(Check(
+        "variação diária dentro do esperado",
+        status,
+        f"maior |variação|={max_abs:.2f}% em {dates.iloc[i]:%Y-%m-%d} "
+        f"(aviso > {PTAX_RET_WARN_ABS_PCT:g}%, falha > {PTAX_RET_FAIL_ABS_PCT:g}%)",
+    ))
+    return checks
+
+
+def summarize_ptax(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty:
+        return []
+    d = df[COL_DATE]
+    price = df[COL_PTAX_VENDA]
+    ret = df[COL_PTAX_RET_DAY]
+    change = (price.iloc[-1] / price.iloc[0] - 1.0) * 100.0
+    return [
+        f"Linhas: {len(df)}",
+        f"Período efetivo: {d.min():%Y-%m-%d} a {d.max():%Y-%m-%d}",
+        f"PTAX venda (R$/US$): primeiro={price.iloc[0]:.4f}, último={price.iloc[-1]:.4f}, "
+        f"mín={price.min():.4f}, máx={price.max():.4f}",
+        f"Variação do primeiro ao último valor: {change:.2f}%",
+        f"Maior alta diária: {ret.max():.2f}%; maior queda diária: {ret.min():.2f}%",
+    ]
+
+
+# --------------------------------------------------------------------------
+# Entre séries
+# --------------------------------------------------------------------------
+
+def validate_date_overlap(
+    a: pd.DataFrame,
+    b: pd.DataFrame,
+    name_a: str = "CDI",
+    name_b: str = "PTAX",
+    minimum: float = MIN_DATE_OVERLAP,
+) -> Check:
+    """Sobreposição de datas entre duas séries na janela que ambas cobrem.
+
+    ``sobreposição = datas em comum / datas de qualquer uma das duas``, contadas
+    só na janela comum (maior das primeiras datas até a menor das últimas), para
+    que uma diferença nas pontas, como a 1ª linha descartada do PTAX, não conte.
+    OK se ``>= minimum``; AVISO caso contrário.
+    """
+    name = f"sobreposição de datas {name_a} x {name_b}"
+    if a is None or b is None or a.empty or b.empty:
+        return Check(name, WARN, "uma das séries está vazia")
+
+    dates_a, dates_b = set(a[COL_DATE]), set(b[COL_DATE])
+    lo = max(min(dates_a), min(dates_b))
+    hi = min(max(dates_a), max(dates_b))
+    if lo > hi:
+        return Check(name, WARN, "as séries não têm janela de datas em comum")
+
+    wa = {d for d in dates_a if lo <= d <= hi}
+    wb = {d for d in dates_b if lo <= d <= hi}
+    union, common = wa | wb, wa & wb
+    ratio = len(common) / len(union)
+    detail = (
+        f"{ratio:.2%} ({len(common)} em comum de {len(union)} datas, "
+        f"janela {lo:%Y-%m-%d} a {hi:%Y-%m-%d}; só {name_a}: {len(wa - wb)}, "
+        f"só {name_b}: {len(wb - wa)}; mínimo {minimum:.0%})"
+    )
+    return _check(name, ratio >= minimum - 1e-12, detail, WARN)
+
+
+# --------------------------------------------------------------------------
+# Saídas gravadas (depois do load)
 # --------------------------------------------------------------------------
 
 def validate_persisted(
-    df: pd.DataFrame, db_path: Path, csv_path: Path, table: str
+    df: pd.DataFrame,
+    columns: list[str],
+    db_path: Path,
+    csv_path: Path,
+    table: str,
 ) -> list[Check]:
     """Relê SQLite e CSV e compara com o DataFrame que foi gravado."""
     checks: list[Check] = []
@@ -336,7 +314,7 @@ def validate_persisted(
             ]
         finally:
             conn.close()
-        ok, detail = _same(stored, df)
+        ok, detail = _same(stored, df, columns)
         checks.append(_check("SQLite == DataFrame", ok, detail))
         checks.append(_check(
             f"SQLite: chave primária em {COL_DATE}", pk == [COL_DATE], f"pk={pk}"
@@ -346,15 +324,17 @@ def validate_persisted(
 
     try:
         stored = pd.read_csv(csv_path)
-        ok, detail = _same(stored, df)
+        ok, detail = _same(stored, df, columns)
         checks.append(_check("CSV == DataFrame", ok, detail))
     except Exception as exc:  # noqa: BLE001
         checks.append(Check("CSV == DataFrame", FAIL, f"{type(exc).__name__}: {exc}"))
     return checks
 
 
-def _same(stored: pd.DataFrame, df: pd.DataFrame) -> tuple[bool, str]:
-    if list(stored.columns) != CDI_COLUMNS:
+def _same(
+    stored: pd.DataFrame, df: pd.DataFrame, columns: list[str]
+) -> tuple[bool, str]:
+    if list(stored.columns) != columns:
         return False, f"colunas diferentes: {list(stored.columns)}"
     if len(stored) != len(df):
         return False, f"{len(stored)} linhas lidas vs {len(df)} gravadas"
@@ -362,7 +342,7 @@ def _same(stored: pd.DataFrame, df: pd.DataFrame) -> tuple[bool, str]:
     want = df[COL_DATE].to_numpy().astype("datetime64[D]")
     if not (got == want).all():
         return False, "datas diferentes"
-    for col in CDI_COLUMNS[1:]:
+    for col in columns[1:]:
         if not np.allclose(
             stored[col].to_numpy(dtype="float64"),
             df[col].to_numpy(dtype="float64"),
@@ -370,12 +350,9 @@ def _same(stored: pd.DataFrame, df: pd.DataFrame) -> tuple[bool, str]:
         ):
             return False, f"valores diferentes em {col}"
     return True, f"{len(df)} linhas idênticas"
-
-
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.pipeline",
