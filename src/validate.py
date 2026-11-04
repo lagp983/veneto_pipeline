@@ -1,10 +1,12 @@
-"""Verificações de qualidade das séries (CDI, PTAX), da carga e entre séries.
+"""Verificações de qualidade das séries (CDI, PTAX, IPCA), da carga e entre séries.
 
 Cada verificação devolve um ``Check`` com status OK, AVISO ou FALHA. Só FALHA
 reprova a pipeline; AVISO é informativo.
 
 - ``daily_checks``: comuns a qualquer série diária (datas, cobertura, estrutura).
-- ``validate_cdi`` / ``validate_ptax``: ``daily_checks`` + regras de cada série.
+- ``monthly_checks``: comuns a qualquer série mensal (datas, cobertura, estrutura).
+- ``validate_cdi`` / ``validate_ptax`` / ``validate_ipca``: ``daily_checks`` ou
+  ``monthly_checks`` + regras de cada série.
 - ``validate_persisted``: relê SQLite e CSV e compara com o DataFrame gravado.
 - ``validate_date_overlap``: sobreposição de datas entre duas séries.
 """
@@ -23,23 +25,30 @@ from .config import (
     COL_CDI_PCT_DAY,
     COL_CDI_PCT_YEAR,
     COL_DATE,
+    COL_IPCA_FACTOR_MONTH,
+    COL_IPCA_PCT_12M,
+    COL_IPCA_PCT_MONTH,
     COL_PTAX_RET_DAY,
     COL_PTAX_VENDA,
+    EDGE_TOLERANCE_DAYS,
+    IPCA_EDGE_TOLERANCE_MONTHS,
+    IPCA_MAX_GAP_MONTHS,
+    IPCA_MIN_MONTHLY_COVERAGE,
+    IPCA_PCT_12M_BOUNDS,
+    IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE,
+    IPCA_WINDOW_MONTHS,
+    MAX_GAP_DAYS,
+    MIN_BUSINESS_DAY_COVERAGE,
     MIN_DATE_OVERLAP,
     PTAX_PRICE_BOUNDS_EXCLUSIVE,
     PTAX_RET_FAIL_ABS_PCT,
     PTAX_RET_WARN_ABS_PCT,
     PTAX_TYPICAL_RANGE,
-    MIN_BUSINESS_DAY_COVERAGE,
-    EDGE_TOLERANCE_DAYS,
-    MAX_GAP_DAYS,
 )
-from .load import CDI_COLUMNS, PTAX_COLUMNS
+from .load import CDI_COLUMNS, IPCA_COLUMNS, PTAX_COLUMNS
 from .transform import BUSINESS_DAYS_PER_YEAR
 
 OK, WARN, FAIL, SKIPPED = "OK", "AVISO", "FALHA", "PULADO"
-
-# Comuns às séries diárias.
 
 FLOAT_RTOL = 1e-12
 
@@ -115,6 +124,78 @@ def daily_checks(
     checks.append(_check(
         "sem buracos longos", max_gap <= MAX_GAP_DAYS,
         f"maior intervalo entre datas: {max_gap}d (limite {MAX_GAP_DAYS}d)",
+        WARN,
+    ))
+    return checks
+
+
+# --------------------------------------------------------------------------
+# Comuns a séries mensais
+# --------------------------------------------------------------------------
+
+def monthly_checks(
+    df: pd.DataFrame, columns: list[str], start: str, end: str
+) -> list[Check]:
+    """Estrutura, datas e cobertura de uma série mensal de meses fechados."""
+    if df is None or df.empty:
+        return [Check("dados não vazios", FAIL, "DataFrame vazio")]
+
+    d = df[COL_DATE]
+    s, e = pd.Timestamp(start), pd.Timestamp(end)
+    first, last = d.min(), d.max()
+    checks: list[Check] = []
+
+    checks.append(_check(
+        "colunas canônicas", list(df.columns) == columns, ", ".join(df.columns),
+    ))
+    n_null = int(df.isna().sum().sum())
+    checks.append(_check("sem valores nulos", n_null == 0, f"{n_null} nulo(s)"))
+    checks.append(_check(
+        "datas únicas e crescentes",
+        bool(d.is_unique and d.is_monotonic_increasing),
+        f"{int(d.duplicated().sum())} duplicada(s)",
+    ))
+    # O transform normaliza toda data para o 1º dia do mês; reforça aqui.
+    n_not_first = int((d.dt.day != 1).sum())
+    checks.append(_check(
+        "datas no 1º dia do mês", n_not_first == 0,
+        f"{n_not_first} linha(s) fora do 1º dia do mês",
+    ))
+    checks.append(_check(
+        "datas dentro da janela pedida", bool(first >= s and last <= e),
+        f"{first:%Y-%m-%d} a {last:%Y-%m-%d}",
+    ))
+
+    # Pontas em meses (a janela pedida pode começar/terminar no meio de um mês).
+    head_m = (first.to_period("M") - s.to_period("M")).n
+    tail_m = (e.to_period("M") - last.to_period("M")).n
+    checks.append(_check(
+        "cobertura nas pontas da janela",
+        0 <= head_m <= IPCA_EDGE_TOLERANCE_MONTHS
+        and 0 <= tail_m <= IPCA_EDGE_TOLERANCE_MONTHS,
+        f"início +{head_m}m, fim -{tail_m}m "
+        f"(tolerância {IPCA_EDGE_TOLERANCE_MONTHS}m)",
+        WARN,
+    ))
+
+    # Cobertura de meses: nº de linhas / nº de meses entre first e last.
+    expected = len(pd.period_range(first.to_period("M"), last.to_period("M"), freq="M"))
+    coverage = len(df) / expected if expected else 0.0
+    checks.append(_check(
+        "cobertura de meses",
+        IPCA_MIN_MONTHLY_COVERAGE <= coverage <= 1.0,
+        f"{len(df)} linhas / {expected} meses = {coverage:.1%} "
+        f"(esperado >= {IPCA_MIN_MONTHLY_COVERAGE:.0%}; série mensal sem feriados)",
+    ))
+
+    # Maior buraco entre observações consecutivas, em meses.
+    month_idx = d.dt.year * 12 + d.dt.month
+    diffs = np.diff(month_idx.to_numpy())
+    max_gap = int(diffs.max()) if len(diffs) else 0
+    checks.append(_check(
+        "sem buracos longos", max_gap <= IPCA_MAX_GAP_MONTHS,
+        f"maior intervalo entre datas: {max_gap}m "
+        f"(limite {IPCA_MAX_GAP_MONTHS}m)",
         WARN,
     ))
     return checks
@@ -247,6 +328,92 @@ def summarize_ptax(df: pd.DataFrame) -> list[str]:
         f"mín={price.min():.4f}, máx={price.max():.4f}",
         f"Variação do primeiro ao último valor: {change:.2f}%",
         f"Maior alta diária: {ret.max():.2f}%; maior queda diária: {ret.min():.2f}%",
+    ]
+
+
+# --------------------------------------------------------------------------
+# IPCA
+# --------------------------------------------------------------------------
+
+def validate_ipca(df: pd.DataFrame, start: str, end: str) -> list[Check]:
+    """Verificações sobre o DataFrame transformado do IPCA."""
+    checks = monthly_checks(df, IPCA_COLUMNS, start, end)
+    if df is None or df.empty:
+        return checks
+
+    pct = df[COL_IPCA_PCT_MONTH].to_numpy(dtype="float64")
+    factor = df[COL_IPCA_FACTOR_MONTH].to_numpy(dtype="float64")
+    pct_12m = df[COL_IPCA_PCT_12M].to_numpy(dtype="float64")
+
+    lo, hi = IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE
+    checks.append(_check(
+        f"ipca_pct_month em ({lo:g}, {hi:g}) % a.m.",
+        bool((pct > lo).all() and (pct < hi).all()),
+        f"min={pct.min():.4f}, max={pct.max():.4f}",
+    ))
+
+    checks.append(_check(
+        "fator = 1 + pct/100",
+        bool(np.allclose(factor, 1.0 + pct / 100.0, rtol=FLOAT_RTOL, atol=0)),
+        "recalculado e comparado",
+    ))
+
+    # Recalcula pct_12m por expm1/log1p (caminho independente do produto direto
+    # usado no transform). Só as linhas em que a janela de 12 meses cabe inteira
+    # no df podem ser verificadas: as primeiras IPCA_WINDOW_MONTHS - 1 linhas
+    # dependem de dados anteriores ao próprio df e ficam de fora.
+    rolling_sum_log = (
+        pd.Series(np.log1p(pct / 100.0)).rolling(IPCA_WINDOW_MONTHS).sum().to_numpy()
+    )
+    ref_12m = np.expm1(rolling_sum_log) * 100.0
+    verify_mask = ~np.isnan(ref_12m)
+    n_verifiable = int(verify_mask.sum())
+    if n_verifiable == 0:
+        checks.append(Check(
+            "ipca_pct_12m recalculado",
+            WARN,
+            f"{len(df)} linha(s): sem {IPCA_WINDOW_MONTHS} meses consecutivos no df "
+            "para verificar (as primeiras linhas dependem de dados anteriores ao df)",
+        ))
+    else:
+        checks.append(_check(
+            "ipca_pct_12m recalculado",
+            bool(np.allclose(
+                pct_12m[verify_mask], ref_12m[verify_mask],
+                rtol=1e-9, atol=1e-12,
+            )),
+            f"recalculado por expm1/log1p em {n_verifiable} de {len(df)} linha(s) "
+            f"(as {IPCA_WINDOW_MONTHS - 1} primeiras dependem de dados anteriores ao df)",
+        ))
+
+    ylo, yhi = IPCA_PCT_12M_BOUNDS
+    checks.append(_check(
+        "ipca_pct_12m plausível",
+        bool(ylo <= pct_12m.min() and pct_12m.max() <= yhi),
+        f"{pct_12m.min():.2f}% a {pct_12m.max():.2f}% "
+        f"(plausível {ylo} a {yhi})",
+        WARN,
+    ))
+    return checks
+
+
+def summarize_ipca(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty:
+        return []
+    d = df[COL_DATE]
+    pct = df[COL_IPCA_PCT_MONTH]
+    pct_12m = df[COL_IPCA_PCT_12M]
+    accumulated = (df[COL_IPCA_FACTOR_MONTH].prod() - 1.0) * 100.0
+    return [
+        f"Linhas: {len(df)}",
+        f"Período efetivo: {d.min():%Y-%m-%d} a {d.max():%Y-%m-%d}",
+        f"IPCA % a.m.: primeiro={pct.iloc[0]:.2f}, último={pct.iloc[-1]:.2f}, "
+        f"mín={pct.min():.2f}, máx={pct.max():.2f}",
+        f"IPCA acumulado em 12 meses: primeiro={pct_12m.iloc[0]:.2f}%, "
+        f"último={pct_12m.iloc[-1]:.2f}%, "
+        f"mín={pct_12m.min():.2f}%, máx={pct_12m.max():.2f}%",
+        f"IPCA acumulado no período: {accumulated:.2f}% "
+        "(confira com o IPCA acumulado no período na calculadora do BCB)",
     ]
 
 
