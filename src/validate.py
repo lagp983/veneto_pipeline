@@ -30,6 +30,9 @@ from .config import (
     PTAX_RET_FAIL_ABS_PCT,
     PTAX_RET_WARN_ABS_PCT,
     PTAX_TYPICAL_RANGE,
+    MIN_BUSINESS_DAY_COVERAGE,
+    EDGE_TOLERANCE_DAYS,
+    MAX_GAP_DAYS,
 )
 from .load import CDI_COLUMNS, PTAX_COLUMNS
 from .transform import BUSINESS_DAYS_PER_YEAR
@@ -37,9 +40,7 @@ from .transform import BUSINESS_DAYS_PER_YEAR
 OK, WARN, FAIL, SKIPPED = "OK", "AVISO", "FALHA", "PULADO"
 
 # Comuns às séries diárias.
-MIN_BUSINESS_DAY_COVERAGE = 0.90  # feriados nacionais ficam em ~96%
-EDGE_TOLERANCE_DAYS = 5
-MAX_GAP_DAYS = 7
+
 FLOAT_RTOL = 1e-12
 
 # Específicas do CDI (o transform já garante 0 < x < 1).

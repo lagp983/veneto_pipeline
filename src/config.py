@@ -1,4 +1,4 @@
-"""Constantes da pipeline ETL (CDI / SGS 12)."""
+"""Constantes da pipeline ETL (CDI, PTAX e IPCA)."""
 
 from datetime import date, datetime
 from pathlib import Path
@@ -14,10 +14,10 @@ PTAX_SGS_COLUMN = "ptax"
 # Séries da pipeline e seleção na CLI (`--series`; padrão: todas).
 SERIES_CDI = "cdi"
 SERIES_PTAX = "ptax"
+SERIES_IPCA = "ipca"
 SERIES_ALL = "all"
-SERIES_CHOICES = (SERIES_CDI, SERIES_PTAX, SERIES_ALL)
+SERIES_CHOICES = (SERIES_CDI, SERIES_PTAX, SERIES_IPCA, SERIES_ALL)
 DEFAULT_SERIES = SERIES_ALL
-
 # Janela móvel: os últimos N anos, terminando hoje (fuso de Brasília).
 LOOKBACK_YEARS = 5
 MARKET_TIMEZONE = "America/Sao_Paulo"
@@ -96,7 +96,9 @@ COL_IPCA_PCT_12M = "ipca_pct_12m"           # acumulado em 12 meses (produto dos
 # Limites de plausibilidade (valores mensais do IPCA raramente saem de (-3%, +3%),
 # mas a série histórica tem eventos extremos; adotar faixa conservadora).
 IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE = (-5.0, 5.0)   # % a.m.
+IPCA_WINDOW_MONTHS = 12  # janela do acumulado em 12 meses; mínimo de observações
 IPCA_MEDIAN_RANGE = (-1.0, 2.0)                 # mediana histórica ~0,3–0,5%
 IPCA_PCT_12M_BOUNDS = (-10.0, 30.0)             # % acumulado 12m
 IPCA_MIN_MONTHLY_COVERAGE = 0.98                # quase 100% (não há “feriados” mensais)
 IPCA_MAX_GAP_MONTHS = 2                         # buraco máximo tolerado (em meses)
+IPCA_EDGE_TOLERANCE_MONTHS = 1
