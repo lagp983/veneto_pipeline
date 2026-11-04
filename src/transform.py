@@ -1,10 +1,15 @@
-"""Transformação do CDI: colunas canônicas, fator diário e anualização (252).
+"""Transformação das séries (CDI, PTAX e IPCA): colunas canônicas e derivados.
 
-Não baixa dados, não grava e não preenche dias sem observação.
+- CDI: fator diário e anualização em 252 dias úteis.
+- PTAX: variação diária (simples, %).
+- IPCA: fator mensal e acumulado em 12 meses.
+
+Não baixa dados, não grava e não preenche observações ausentes.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from .config import (
@@ -14,8 +19,15 @@ from .config import (
     COL_CDI_PCT_DAY,
     COL_CDI_PCT_YEAR,
     COL_DATE,
+    COL_IPCA_FACTOR_MONTH,
+    COL_IPCA_PCT_12M,
+    COL_IPCA_PCT_MONTH,
     COL_PTAX_RET_DAY,
     COL_PTAX_VENDA,
+    IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE,
+    IPCA_SGS_CODE,
+    IPCA_SGS_COLUMN,
+    IPCA_WINDOW_MONTHS,
     PTAX_PRICE_BOUNDS_EXCLUSIVE,
     PTAX_SGS_CODE,
     PTAX_SGS_COLUMN,
@@ -53,7 +65,7 @@ def transform_cdi(raw: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("transform_cdi recebeu um DataFrame vazio.")
 
     values = _extract_values(raw)
-    dates = _normalize_dates(values.index)
+    dates = _normalize_dates(values.index, "série CDI")
 
     df = pd.DataFrame(
         {
@@ -85,7 +97,7 @@ def _extract_values(
 ) -> pd.Series:
     """Localiza a coluna de valor, converte para número e descarta NaN.
 
-    Os padrões são os do CDI; o PTAX passa a sua coluna, código e rótulo.
+    Os padrões são os do CDI; o PTAX e o IPCA passam a sua coluna, código e rótulo.
     """
     if column in raw.columns:
         series = raw[column]
@@ -106,14 +118,14 @@ def _extract_values(
     return values
 
 
-def _normalize_dates(index: pd.Index) -> pd.Series:
+def _normalize_dates(index: pd.Index, label: str = "série") -> pd.Series:
     """Índice -> datas ``datetime64[ns]`` sem fuso e sem hora."""
     if not isinstance(index, pd.DatetimeIndex):
         try:
             index = pd.DatetimeIndex(pd.to_datetime(index))
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                "O índice da série CDI não é interpretável como data."
+                f"O índice da {label} não é interpretável como data."
             ) from exc
     if index.tz is not None:
         index = index.tz_localize(None)
@@ -160,7 +172,7 @@ def transform_ptax(raw: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("transform_ptax recebeu um DataFrame vazio.")
 
     values = _extract_values(raw, PTAX_SGS_COLUMN, PTAX_SGS_CODE, "PTAX")
-    dates = _normalize_dates(values.index)
+    dates = _normalize_dates(values.index, "série PTAX")
 
     df = pd.DataFrame(
         {
@@ -198,4 +210,89 @@ def _check_ptax_price_range(price: pd.Series) -> None:
             f"PTAX fora do intervalo esperado para R$/US$ ({low:g} < x < {high:g}): "
             f"{int(bad.sum())} valor(es), min={price.min():.4g}, "
             f"max={price.max():.4g}."
+        )
+
+
+def transform_ipca(raw: pd.DataFrame) -> pd.DataFrame:
+    """Converte a série bruta do IPCA (SGS 433) na tabela canônica.
+
+    Colunas devolvidas, nesta ordem:
+
+    - ``date``: ``datetime64[ns]``, sem fuso, **1º dia do mês**, ordenada e
+      sem duplicatas.
+    - ``ipca_pct_month``: variação % mensal (como vem do SGS 433), ``float64``.
+      Pode ser negativa (deflação).
+    - ``ipca_factor_month``: ``1 + ipca_pct_month / 100``, ``float64``.
+    - ``ipca_pct_12m``: acumulado em 12 meses,
+      ``(prod(factor_month dos últimos 12 meses) - 1) * 100``, ``float64``.
+
+    Só os meses presentes na entrada aparecem na saída: não reindexa, não
+    preenche meses ausentes e não interpola. Linhas sem valor numérico são
+    descartadas (não preenchidas). Como ``ipca_pct_12m`` precisa de 12
+    observações, as primeiras ``IPCA_WINDOW_MONTHS - 1`` linhas são
+    descartadas; a saída tem ``len(entrada_válida) - (IPCA_WINDOW_MONTHS - 1)``
+    linhas e nenhum valor nulo.
+
+    Raises
+    ------
+    ValueError
+        Entrada vazia; coluna de valor não encontrada; índice que não seja
+        data; datas duplicadas após normalização para o 1º dia do mês;
+        valores fora de ``IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE``; ou menos de
+        ``IPCA_WINDOW_MONTHS`` observações válidas.
+    """
+    if raw is None or raw.empty:
+        raise ValueError("transform_ipca recebeu um DataFrame vazio.")
+
+    values = _extract_values(raw, IPCA_SGS_COLUMN, IPCA_SGS_CODE, "IPCA")
+    dates = _normalize_dates(values.index, "série IPCA")
+    # O SGS 433 já vem no 1º dia do mês; normalizar garante a convenção para
+    # o SQLite/CSV (TEXT ISO) e para a validação ``monthly_checks``.
+    dates = pd.Series(dates.dt.to_period("M").dt.to_timestamp())
+
+    df = pd.DataFrame(
+        {
+            COL_DATE: dates,
+            COL_IPCA_PCT_MONTH: values.to_numpy(dtype="float64"),
+        }
+    )
+
+    if df[COL_DATE].duplicated().any():
+        dups = df.loc[df[COL_DATE].duplicated(), COL_DATE].dt.date.tolist()[:5]
+        raise ValueError(f"Datas duplicadas na série IPCA (ex.: {dups}).")
+
+    _check_ipca_pct_month_range(df[COL_IPCA_PCT_MONTH])
+
+    df = df.sort_values(COL_DATE, kind="stable").reset_index(drop=True)
+    if len(df) < IPCA_WINDOW_MONTHS:
+        raise ValueError(
+            f"IPCA precisa de pelo menos {IPCA_WINDOW_MONTHS} observações "
+            f"válidas para calcular o acumulado em 12 meses; "
+            f"recebidas {len(df)}."
+        )
+
+    df[COL_IPCA_FACTOR_MONTH] = 1.0 + df[COL_IPCA_PCT_MONTH] / 100.0
+    rolling_prod = (
+        df[COL_IPCA_FACTOR_MONTH]
+        .rolling(IPCA_WINDOW_MONTHS)
+        .apply(np.prod, raw=True)
+    )
+    df[COL_IPCA_PCT_12M] = (rolling_prod - 1.0) * 100.0
+    # As primeiras 11 linhas não têm 12 meses completos; descarta.
+    df = df.iloc[IPCA_WINDOW_MONTHS - 1:].reset_index(drop=True)
+
+    return df[
+        [COL_DATE, COL_IPCA_PCT_MONTH, COL_IPCA_FACTOR_MONTH, COL_IPCA_PCT_12M]
+    ]
+
+
+def _check_ipca_pct_month_range(pct_month: pd.Series) -> None:
+    low, high = IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE
+    bad = (pct_month <= low) | (pct_month >= high)
+    if bad.any():
+        raise ValueError(
+            f"IPCA fora do intervalo esperado para % a.m. "
+            f"({low:g} < x < {high:g}): "
+            f"{int(bad.sum())} valor(es), min={pct_month.min():.4g}, "
+            f"max={pct_month.max():.4g}."
         )
