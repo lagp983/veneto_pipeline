@@ -7,6 +7,17 @@ from pathlib import Path
 CDI_SGS_CODE = 12
 CDI_SGS_COLUMN = "cdi"
 
+# Série PTAX venda no SGS do BCB (R$/US$, só dia útil).
+PTAX_SGS_CODE = 1
+PTAX_SGS_COLUMN = "ptax"
+
+# Séries da pipeline e seleção na CLI (`--series`; padrão: todas).
+SERIES_CDI = "cdi"
+SERIES_PTAX = "ptax"
+SERIES_ALL = "all"
+SERIES_CHOICES = (SERIES_CDI, SERIES_PTAX, SERIES_ALL)
+DEFAULT_SERIES = SERIES_ALL
+
 # Janela móvel: os últimos N anos, terminando hoje (fuso de Brasília).
 LOOKBACK_YEARS = 5
 MARKET_TIMEZONE = "America/Sao_Paulo"
@@ -50,10 +61,24 @@ COL_DATE = "date"
 COL_CDI_PCT_DAY = "cdi_pct_day"
 COL_CDI_FACTOR_DAY = "cdi_factor_day"
 COL_CDI_PCT_YEAR = "cdi_pct_year"
+COL_PTAX_VENDA = "ptax_venda"  # R$ por US$
+COL_PTAX_RET_DAY = "ptax_ret_day"  # variação simples (%) vs. observação anterior
 
 CDI_TABLE = "cdi"
+PTAX_TABLE = "ptax"
+
+# Limites do PTAX (R$/US$) usados no extract, transform e validação.
+PTAX_MEDIAN_RANGE = (1.0, 20.0)  # extract: mediana fora disso = unidade/série errada
+PTAX_PRICE_BOUNDS_EXCLUSIVE = (0.0, 20.0)  # transform: fora de (0, 20) = erro
+PTAX_TYPICAL_RANGE = (3.0, 8.0)  # validação: fora disso = aviso (a calibrar)
+PTAX_RET_WARN_ABS_PCT = 8.0  # |variação diária| acima disso = aviso
+PTAX_RET_FAIL_ABS_PCT = 25.0  # |variação diária| acima disso = falha
+
+# Qualidade cruzada: sobreposição de datas entre CDI e PTAX (>= limite = OK).
+MIN_DATE_OVERLAP = 0.98
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 DB_PATH = DATA_DIR / "market.sqlite"
 CDI_CSV_PATH = DATA_DIR / "cdi.csv"
+PTAX_CSV_PATH = DATA_DIR / "ptax.csv"
