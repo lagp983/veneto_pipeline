@@ -11,21 +11,12 @@ from .config import (
     PTAX_MEDIAN_RANGE,
     PTAX_SGS_CODE,
     PTAX_SGS_COLUMN,
+    IPCA_SGS_CODE,
+    IPCA_SGS_COLUMN,
+    IPCA_MEDIAN_RANGE,
+    SGS_TIMEOUT_SECONDS,
+    CDI_MAX_MEDIAN_PCT_DAY,
 )
-
-# TODO(config): mover para config.py junto com as demais constantes do IPCA.
-# Mantidas localmente por ora para adicionar o IPCA sem alterar outros arquivos.
-IPCA_SGS_CODE = 433
-IPCA_SGS_COLUMN = "ipca"
-# IPCA mensal histórico fica tipicamente em ~0.2–0.8%; mediana fora de
-# (-1, 2) sugere série/unidade errada. Valores negativos são válidos (deflação).
-IPCA_MEDIAN_RANGE = (-1.0, 2.0)
-
-# Janela de 5 anos cabe em uma chamada; timeout explícito por tentativa HTTP.
-SGS_TIMEOUT_SECONDS = 120
-
-# SGS 12 é % a.d. (~0.007 a 0.06). Mediana > 1 indica série/unidade errada.
-CDI_MAX_MEDIAN_PCT_DAY = 1.0
 
 
 def extract_cdi(start, end) -> pd.DataFrame:
