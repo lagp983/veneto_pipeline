@@ -6,16 +6,21 @@ import pandas as pd
 from bcb import sgs
 
 from .config import (
+    CDI_MAX_MEDIAN_PCT_DAY,
     CDI_SGS_CODE,
     CDI_SGS_COLUMN,
+    IBOV_COLUMN,
+    IBOV_MEDIAN_RANGE,
+    IBOV_TICKER,
+    IBOV_TZ,
+    IBOV_YF_TIMEOUT,
+    IPCA_MEDIAN_RANGE,
+    IPCA_SGS_CODE,
+    IPCA_SGS_COLUMN,
     PTAX_MEDIAN_RANGE,
     PTAX_SGS_CODE,
     PTAX_SGS_COLUMN,
-    IPCA_SGS_CODE,
-    IPCA_SGS_COLUMN,
-    IPCA_MEDIAN_RANGE,
     SGS_TIMEOUT_SECONDS,
-    CDI_MAX_MEDIAN_PCT_DAY,
 )
 
 
@@ -125,13 +130,98 @@ def extract_ipca(start, end) -> pd.DataFrame:
         )
     return raw
 
+def extract_ibov(start, end) -> pd.DataFrame:
+    """Baixa a série bruta do IBOVESPA (``^BVSP`` via ``yfinance``) entre ``start`` e ``end``.
 
-def _raw_values(raw: pd.DataFrame, column: str, code: int, label: str) -> pd.Series:
+    Devolve o DataFrame ainda cru: ``DatetimeIndex`` tz-naive, normalizado
+    para ``IBOV_TZ`` (``America/Sao_Paulo``) e sem hora, e uma única coluna
+    ``IBOV_COLUMN`` (``"ibov"``) com os pontos de fechamento (``Close``).
+    Não calcula retorno, não preenche dias sem pregão, não interpola e não
+    persiste.
+
+    Observações:
+
+    - O ``yfinance`` trata ``end`` como **exclusivo**; somamos 1 dia para que
+      a janela pedida seja inclusiva, como nas demais séries.
+    - ``Ticker.history`` é usado em vez de ``yf.download`` para evitar o
+      ``MultiIndex`` de colunas; se ainda assim vier MultiIndex, é achatado
+      no primeiro nível (``Close``).
+    - ``auto_adjust=False`` fixa ``Close`` como preço de fechamento bruto
+      (para ``^BVSP`` não há ajuste por proventos, mas fixar evita variação
+      entre versões do yfinance).
+    - A importação do ``yfinance`` é lazy: quem não usa ``--series ibov``
+      não precisa da dependência instalada.
+
+    Raises
+    ------
+    ImportError
+        Se o pacote ``yfinance`` não estiver instalado.
+    ValueError
+        Se a extração vier vazia, sem a coluna ``Close``, sem valores
+        numéricos, ou se a mediana ficar fora de ``IBOV_MEDIAN_RANGE``
+        (ticker errado ou unidade incompatível com pontos do índice).
+    """
+    try:
+        import yfinance as yf
+    except ImportError as exc:  # pragma: no cover - depende do ambiente
+        raise ImportError(
+            "extract_ibov requer o pacote `yfinance`. "
+            "Instale com `pip install yfinance` (ou `pip install .[ibov]`)."
+        ) from exc
+
+    # yfinance: `end` é exclusivo. Soma 1 dia para tornar a janela inclusiva.
+    end_inclusive = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    raw = yf.Ticker(IBOV_TICKER).history(
+        start=start,
+        end=end_inclusive,
+        interval="1d",
+        auto_adjust=False,
+        actions=False,
+        timeout=IBOV_YF_TIMEOUT,
+    )
+    if raw is None or raw.empty:
+        raise ValueError(
+            f"Extração {IBOV_TICKER} vazia para start={start!r} end={end!r}."
+        )
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    if "Close" not in raw.columns:
+        raise ValueError(
+            f"Coluna 'Close' não encontrada na extração {IBOV_TICKER}. "
+            f"Colunas: {list(raw.columns)}"
+        )
+
+    # Fuso: converte para o fuso do pregão antes de descartar tz, para não
+    # deslocar a data em pregões que fecham após 21h UTC (fuso de Brasília).
+    if isinstance(raw.index, pd.DatetimeIndex):
+        if raw.index.tz is not None:
+            raw.index = raw.index.tz_convert(IBOV_TZ).tz_localize(None)
+        raw.index = raw.index.normalize()
+
+    raw = raw[["Close"]].rename(columns={"Close": IBOV_COLUMN})
+
+    values = _raw_values(raw, IBOV_COLUMN, IBOV_TICKER, "IBOV")
+    median = float(values.median())
+    low, high = IBOV_MEDIAN_RANGE
+    if not (low <= median <= high):
+        raise ValueError(
+            f"Unidade errada na série {IBOV_TICKER}: esperado pontos do "
+            f"IBOVESPA (mediana entre {low:g} e {high:g}), "
+            f"mediana={median:.4g}."
+        )
+    return raw
+
+def _raw_values(
+    raw: pd.DataFrame, column: str, code: int | str, label: str
+) -> pd.Series:
     """Localiza a coluna de valor de ``raw``, converte para número e descarta NaN.
 
     Aceita a coluna pelo nome (``column``), pelo código em string, pelo código
     numérico ou, na falta deles, a única coluna do DataFrame. Padrão comum às
-    séries CDI, PTAX e IPCA.
+    séries CDI, PTAX, IPCA e IBOV (neste último, ``code`` é o ticker e o
+    caminho normal é encontrar a coluna pelo nome após o ``rename``).
     """
     if column in raw.columns:
         series = raw[column]
@@ -162,3 +252,6 @@ def _cdi_raw_values(raw: pd.DataFrame) -> pd.Series:
 
 def _ptax_raw_values(raw: pd.DataFrame) -> pd.Series:
     return _raw_values(raw, PTAX_SGS_COLUMN, PTAX_SGS_CODE, "PTAX")
+
+def _ibov_raw_values(raw: pd.DataFrame) -> pd.Series:
+    return _raw_values(raw, IBOV_COLUMN, IBOV_TICKER, "IBOV")
