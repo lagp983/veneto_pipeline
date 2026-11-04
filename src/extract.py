@@ -1,4 +1,4 @@
-"""Extração bruta das séries. Não limpa, não anualiza, não grava."""
+"""Extração bruta das séries (CDI, PTAX, IPCA). Não limpa, não anualiza, não grava."""
 
 from __future__ import annotations
 
@@ -12,6 +12,14 @@ from .config import (
     PTAX_SGS_CODE,
     PTAX_SGS_COLUMN,
 )
+
+# TODO(config): mover para config.py junto com as demais constantes do IPCA.
+# Mantidas localmente por ora para adicionar o IPCA sem alterar outros arquivos.
+IPCA_SGS_CODE = 433
+IPCA_SGS_COLUMN = "ipca"
+# IPCA mensal histórico fica tipicamente em ~0.2–0.8%; mediana fora de
+# (-1, 2) sugere série/unidade errada. Valores negativos são válidos (deflação).
+IPCA_MEDIAN_RANGE = (-1.0, 2.0)
 
 # Janela de 5 anos cabe em uma chamada; timeout explícito por tentativa HTTP.
 SGS_TIMEOUT_SECONDS = 120
@@ -43,7 +51,7 @@ def extract_cdi(start, end) -> pd.DataFrame:
             f"Extração SGS {CDI_SGS_CODE} vazia para start={start!r} end={end!r}."
         )
 
-    values = _cdi_raw_values(raw)
+    values = _raw_values(raw, CDI_SGS_COLUMN, CDI_SGS_CODE, "CDI")
     median = float(values.median())
     if median > CDI_MAX_MEDIAN_PCT_DAY:
         raise ValueError(
@@ -52,25 +60,6 @@ def extract_cdi(start, end) -> pd.DataFrame:
             "Não usar 4389/4391 nem tratar o valor como % a.a."
         )
     return raw
-
-
-def _cdi_raw_values(raw: pd.DataFrame) -> pd.Series:
-    if CDI_SGS_COLUMN in raw.columns:
-        series = raw[CDI_SGS_COLUMN]
-    elif str(CDI_SGS_CODE) in raw.columns:
-        series = raw[str(CDI_SGS_CODE)]
-    elif CDI_SGS_CODE in raw.columns:
-        series = raw[CDI_SGS_CODE]
-    elif raw.shape[1] == 1:
-        series = raw.iloc[:, 0]
-    else:
-        raise ValueError(
-            f"Coluna de valor do CDI não encontrada. Colunas: {list(raw.columns)}"
-        )
-    values = pd.to_numeric(series, errors="coerce").dropna()
-    if values.empty:
-        raise ValueError("Série CDI sem valores numéricos após a extração.")
-    return values
 
 
 def extract_ptax(start, end) -> pd.DataFrame:
@@ -97,7 +86,7 @@ def extract_ptax(start, end) -> pd.DataFrame:
             f"Extração SGS {PTAX_SGS_CODE} vazia para start={start!r} end={end!r}."
         )
 
-    values = _ptax_raw_values(raw)
+    values = _raw_values(raw, PTAX_SGS_COLUMN, PTAX_SGS_CODE, "PTAX")
     median = float(values.median())
     low, high = PTAX_MEDIAN_RANGE
     if not (low <= median <= high):
@@ -109,20 +98,76 @@ def extract_ptax(start, end) -> pd.DataFrame:
     return raw
 
 
-def _ptax_raw_values(raw: pd.DataFrame) -> pd.Series:
-    if PTAX_SGS_COLUMN in raw.columns:
-        series = raw[PTAX_SGS_COLUMN]
-    elif str(PTAX_SGS_CODE) in raw.columns:
-        series = raw[str(PTAX_SGS_CODE)]
-    elif PTAX_SGS_CODE in raw.columns:
-        series = raw[PTAX_SGS_CODE]
+def extract_ipca(start, end) -> pd.DataFrame:
+    """Baixa a série bruta do IPCA (SGS 433, variação % mensal) entre ``start`` e ``end``.
+
+    Devolve o DataFrame ainda cru (índice de data — 1º dia do mês — e coluna de
+    valor da API). Não preenche meses ausentes, não interpola, não acumula e não
+    persiste.
+
+    Raises
+    ------
+    ValueError
+        Se a extração vier vazia, sem valores numéricos, ou se a mediana
+        ficar fora de ``IPCA_MEDIAN_RANGE`` (unidade/série incompatível com
+        variação % mensal; valores negativos são permitidos).
+    """
+    raw = sgs.get(
+        {IPCA_SGS_COLUMN: IPCA_SGS_CODE},
+        start=start,
+        end=end,
+        timeout=SGS_TIMEOUT_SECONDS,
+    )
+    if raw is None or raw.empty:
+        raise ValueError(
+            f"Extração SGS {IPCA_SGS_CODE} vazia para start={start!r} end={end!r}."
+        )
+
+    values = _raw_values(raw, IPCA_SGS_COLUMN, IPCA_SGS_CODE, "IPCA")
+    median = float(values.median())
+    low, high = IPCA_MEDIAN_RANGE
+    if not (low <= median <= high):
+        raise ValueError(
+            f"Unidade errada na série IPCA (SGS {IPCA_SGS_CODE}): esperado "
+            f"variação % mensal (mediana entre {low:g} e {high:g}), "
+            f"mediana={median:.4g}."
+        )
+    return raw
+
+
+def _raw_values(raw: pd.DataFrame, column: str, code: int, label: str) -> pd.Series:
+    """Localiza a coluna de valor de ``raw``, converte para número e descarta NaN.
+
+    Aceita a coluna pelo nome (``column``), pelo código em string, pelo código
+    numérico ou, na falta deles, a única coluna do DataFrame. Padrão comum às
+    séries CDI, PTAX e IPCA.
+    """
+    if column in raw.columns:
+        series = raw[column]
+    elif str(code) in raw.columns:
+        series = raw[str(code)]
+    elif code in raw.columns:
+        series = raw[code]
     elif raw.shape[1] == 1:
         series = raw.iloc[:, 0]
     else:
         raise ValueError(
-            f"Coluna de valor do PTAX não encontrada. Colunas: {list(raw.columns)}"
+            f"Coluna de valor do {label} não encontrada. Colunas: {list(raw.columns)}"
         )
     values = pd.to_numeric(series, errors="coerce").dropna()
     if values.empty:
-        raise ValueError("Série PTAX sem valores numéricos após a extração.")
+        raise ValueError(f"Série {label} sem valores numéricos após a extração.")
     return values
+
+
+# --------------------------------------------------------------------------
+# Compatibilidade: nomes privados usados por testes/chamadas anteriores.
+# Delegação para ``_raw_values`` mantém as mensagens de erro e o retorno.
+# --------------------------------------------------------------------------
+
+def _cdi_raw_values(raw: pd.DataFrame) -> pd.Series:
+    return _raw_values(raw, CDI_SGS_COLUMN, CDI_SGS_CODE, "CDI")
+
+
+def _ptax_raw_values(raw: pd.DataFrame) -> pd.Series:
+    return _raw_values(raw, PTAX_SGS_COLUMN, PTAX_SGS_CODE, "PTAX")
