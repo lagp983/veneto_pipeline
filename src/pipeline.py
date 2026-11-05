@@ -1,20 +1,21 @@
-"""Orquestração da pipeline (CDI, PTAX e IPCA): extract -> transform -> load, com relatório.
+"""Orquestração da pipeline (CDI, PTAX, IPCA e IBOV): extract -> transform -> load, com relatório.
 
 Uso (a partir da raiz do repositório)::
 
     python -m src.pipeline                      # todas as séries (padrão)
     python -m src.pipeline --series ptax
-    python -m src.pipeline --series ipca --start 2021-11-01 --end 2026-11-01
+    python -m src.pipeline --series ibov --start 2021-11-01 --end 2026-11-01
 
 Fluxo, por série (cada série roda de forma independente):
-    1. extract   (SGS via python-bcb)
+    1. extract   (SGS via python-bcb para CDI/PTAX/IPCA; yfinance para IBOV)
     2. transform (colunas canônicas e derivados da série)
     3. validação dos dados (antes de gravar)
     4. load      (SQLite replace + CSV) -- pulado se a validação dos dados falhar,
        para não sobrescrever saídas boas com dados ruins
     5. validação das saídas (relê SQLite e CSV e compara com o DataFrame)
-Com CDI e PTAX presentes, ainda há a checagem cruzada de sobreposição de datas
-(só entre as duas séries diárias; o IPCA é mensal e não entra nessa checagem).
+Com CDI, PTAX e/ou IBOV presentes, ainda há a checagem cruzada de sobreposição
+de datas entre todos os pares de séries diárias; o IPCA, por ser mensal, não
+entra nessa checagem.
 
 Códigos de saída: 0 aprovado (avisos permitidos), 1 validação reprovada,
 2 falha em uma etapa (extract/transform/load) de alguma série.
@@ -33,6 +34,7 @@ import sqlite3  # noqa: F401 - mantido: fazia parte do namespace anterior
 import sys
 import time
 from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -49,6 +51,9 @@ from .config import (
     COL_DATE,  # noqa: F401
     DB_PATH,
     DEFAULT_SERIES,
+    IBOV_CSV_PATH,
+    IBOV_TICKER,
+    IBOV_TABLE,
     IPCA_CSV_PATH,
     IPCA_SGS_CODE,
     IPCA_TABLE,
@@ -58,22 +63,27 @@ from .config import (
     SERIES_ALL,
     SERIES_CDI,
     SERIES_CHOICES,
+    SERIES_IBOV,
     SERIES_IPCA,
     SERIES_PTAX,
+    IPCA_WARMUP_MONTHS
     default_window,
 )
-from .extract import extract_cdi, extract_ipca, extract_ptax
+from .extract import extract_cdi, extract_ibov, extract_ipca, extract_ptax
 from .load import (
     CDI_COLUMNS,
+    IBOV_COLUMNS,
     IPCA_COLUMNS,
     PTAX_COLUMNS,
     load_cdi,
+    load_ibov,
     load_ipca,
     load_ptax,
 )
 from .transform import (  # noqa: F401 - BUSINESS_DAYS_PER_YEAR reexportado (API anterior)
     BUSINESS_DAYS_PER_YEAR,
     transform_cdi,
+    transform_ibov,
     transform_ipca,
     transform_ptax,
 )
@@ -91,10 +101,12 @@ from .validate import (  # noqa: F401 - limites e helpers reexportados (API ante
     Check,
     _check,
     summarize_cdi,
+    summarize_ibov,
     summarize_ipca,
     summarize_ptax,
     validate_cdi,
     validate_date_overlap,
+    validate_ibov,
     validate_ipca,
     validate_ptax,
 )
@@ -118,7 +130,21 @@ class SeriesSpec:
     columns: list[str]
     table: str
     csv_path: Path
+    # Meses extras buscados antes de `start` para os derivados da primeira
+    # linha; o excedente é descartado após o transform. 0 = sem warmup.
+    warmup_months: int = 0
 
+# Rótulos usados no relatório (checagem cruzada e títulos).
+_DISPLAY: dict[str, str] = {
+    SERIES_CDI: "CDI",
+    SERIES_PTAX: "PTAX",
+    SERIES_IPCA: "IPCA",
+    SERIES_IBOV: "IBOV",
+}
+
+# Séries diárias: únicas que participam da checagem cruzada de datas.
+# O IPCA é mensal e fica de fora por construção.
+_DAILY_SERIES = (SERIES_CDI, SERIES_PTAX, SERIES_IBOV)
 
 SERIES: dict[str, SeriesSpec] = {
     SERIES_CDI: SeriesSpec(
@@ -156,6 +182,19 @@ SERIES: dict[str, SeriesSpec] = {
         columns=IPCA_COLUMNS,
         table=IPCA_TABLE,
         csv_path=IPCA_CSV_PATH,
+        warmup_months=IPCA_WARMUP_MONTHS,
+    ),
+        SERIES_IBOV: SeriesSpec(
+        name=SERIES_IBOV,
+        title=f"Pipeline IBOVESPA (yfinance {IBOV_TICKER})",
+        extract=extract_ibov,
+        transform=transform_ibov,
+        validate=validate_ibov,
+        summarize=summarize_ibov,
+        load=load_ibov,
+        columns=IBOV_COLUMNS,
+        table=IBOV_TABLE,
+        csv_path=IBOV_CSV_PATH,
     ),
 }
 
@@ -312,26 +351,48 @@ def run_series(
     """Executa a pipeline de uma série e devolve o relatório (não levanta por falha de etapa).
 
     Sem ``start``/``end``, usa os últimos ``LOOKBACK_YEARS`` anos até hoje.
+
+    Se ``spec.warmup_months > 0`` (caso do IPCA), o extract é chamado
+    ``warmup_months`` meses antes de ``start`` para que a primeira linha da
+    janela pedida já tenha os dados anteriores necessários ao cálculo dos
+    derivados (ex.: ``ipca_pct_12m``). O excedente é descartado após o
+    transform, de modo que ``report.df`` cobre exatamente ``[start, end]`` e
+    todas as validações continuam usando a janela pedida, sem alteração.
     """
     default_start, default_end = default_window()
     start = start or default_start
     end = end or default_end
     table = table or spec.table
     extract_fn = extract_fn or spec.extract
+    extract_start = _shift_months_back(start, spec.warmup_months)
+
     report = PipelineReport(
         start, end, Path(db_path), Path(csv_path or spec.csv_path), table, title=spec.title
     )
     try:
         raw = _stage(
-            report, "extract", lambda: extract_fn(start, end),
-            lambda r: f"{len(r)} linhas brutas",
+            report, "extract",
+            lambda: extract_fn(extract_start, end),
+            lambda r: f"{len(r)} linhas brutas" + (
+                f" (warmup: janela {extract_start} a {end})"
+                if extract_start != start else ""
+            ),
         )
         df = _stage(
             report, "transform", lambda: spec.transform(raw),
             lambda d: f"{len(d)} linhas canônicas",
         )
-        report.df = df
 
+        if spec.warmup_months:
+            before = len(df)
+            df = df[df[COL_DATE] >= pd.Timestamp(start)].reset_index(drop=True)
+            if before > len(df):
+                report.info.append(
+                    f"Warmup: {before - len(df)} linha(s) antes de {start} "
+                    f"usada(s) só no cálculo dos derivados e descartada(s)."
+                )
+
+        report.df = df
         report.checks += spec.validate(df, start, end)
         report.info += spec.summarize(df)
 
@@ -365,15 +426,16 @@ def run_all(
 ) -> PipelineRun:
     """Executa uma série ou todas (``series="all"``), cada uma de forma independente.
 
-    ``csv_paths`` troca o CSV de cada série (chave: ``"cdi"``/``"ptax"``/``"ipca"``);
+    ``csv_paths`` troca o CSV de cada série (chave: ``"cdi"``/``"ptax"``/``"ipca"``/``"ibov"``);    
     sem ele, usa os caminhos do ``config.py``. ``extract_fns`` troca a extração por
     série (testes). Todas as séries usam a mesma janela.
 
-    A checagem cruzada de sobreposição de datas só ocorre entre CDI e PTAX
-    (séries diárias); o IPCA, por ser mensal, não é comparado por data com as
-    demais. Ela é executada sempre que ambos os relatórios estiverem presentes,
-    independentemente de a chamada ser ``series="all"`` ou uma combinação que
-    inclua os dois.
+    A checagem cruzada de sobreposição de datas ocorre entre todos os pares
+    de séries diárias presentes (CDI, PTAX, IBOV). O IPCA, por ser mensal,
+    não é comparado por data com as demais. A checagem é executada sempre
+    que pelo menos duas séries diárias estiverem nos relatórios,
+    independentemente de a chamada ser ``series="all"`` ou uma combinação
+    que inclua as duas.
     """
     if series not in SERIES_CHOICES:
         raise ValueError(f"Série desconhecida: {series!r}. Opções: {SERIES_CHOICES}.")
@@ -393,18 +455,31 @@ def run_all(
 
     run = PipelineRun(reports)
     by_name = {spec.name: report for spec, report in zip(specs, reports)}
-    if SERIES_CDI in by_name and SERIES_PTAX in by_name:
+    daily_present = [name for name in _DAILY_SERIES if name in by_name]
+    for name_a, name_b in combinations(daily_present, 2):
         run.cross_checks.append(
-            _overlap_check(by_name[SERIES_CDI], by_name[SERIES_PTAX])
+            _overlap_check(by_name[name_a], by_name[name_b], name_a, name_b)
         )
     return run
 
 
-def _overlap_check(a: PipelineReport, b: PipelineReport) -> Check:
-    name = "sobreposição de datas CDI x PTAX"
+def _overlap_check(
+    a: PipelineReport,
+    b: PipelineReport,
+    name_a: str = SERIES_CDI,
+    name_b: str = SERIES_PTAX,
+) -> Check:
+    """Checagem cruzada de sobreposição de datas entre duas séries diárias.
+
+    Os defaults (``cdi``, ``ptax``) preservam a chamada da versão anterior;
+    ``run_all`` passa explicitamente o par para as combinações novas.
+    """
+    label = f"sobreposição de datas {_DISPLAY[name_a]} x {_DISPLAY[name_b]}"
     if a.df is None or b.df is None:
-        return Check(name, SKIPPED, "uma das séries não chegou a ser transformada")
-    return validate_date_overlap(a.df, b.df, "CDI", "PTAX")
+        return Check(label, SKIPPED, "uma das séries não chegou a ser transformada")
+    return validate_date_overlap(
+        a.df, b.df, _DISPLAY[name_a], _DISPLAY[name_b]
+    )
 
 
 def _stage(
@@ -424,7 +499,15 @@ def _stage(
     report.stages.append(Stage(name, OK, describe(result), time.perf_counter() - t0))
     return result
 
+def _shift_months_back(date_str: str, months: int) -> str:
+    """Subtrai ``months`` meses de ``date_str`` (YYYY-MM-DD) e devolve YYYY-MM-DD.
 
+    ``months <= 0`` devolve ``date_str`` sem alteração. Usa ``pd.DateOffset``,
+    que trata fim de mês e ano bissexto (ex.: 2024-03-31 − 1 mês = 2024-02-29).
+    """
+    if months <= 0:
+        return date_str
+    return (pd.Timestamp(date_str) - pd.DateOffset(months=months)).strftime("%Y-%m-%d")
 # --------------------------------------------------------------------------
 # Validação dos dados (antes do load) -- nomes anteriores do CDI; regras em validate.py
 # --------------------------------------------------------------------------
@@ -462,7 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.pipeline",
         description=(
-            "Pipeline CDI, PTAX e IPCA: extract, transform, load "
+            "Pipeline CDI, PTAX, IPCA e IBOV: extract, transform, load "
             "e relatório de validação."
         ),
     )
@@ -487,6 +570,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ipca-csv", default=str(IPCA_CSV_PATH), help="arquivo CSV de saída do IPCA"
     )
+    parser.add_argument(
+        "--ibov-csv", default=str(IBOV_CSV_PATH),
+        help="arquivo CSV de saída do IBOV",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -503,6 +590,7 @@ def main(argv: list[str] | None = None) -> int:
             SERIES_CDI: args.csv,
             SERIES_PTAX: args.ptax_csv,
             SERIES_IPCA: args.ipca_csv,
+            SERIES_IBOV: args.ibov_csv,
         },
     )
     print(run.render())

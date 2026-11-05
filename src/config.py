@@ -101,6 +101,7 @@ COL_IPCA_PCT_12M = "ipca_pct_12m"           # acumulado em 12 meses (produto dos
 # mas a série histórica tem eventos extremos; adotar faixa conservadora).
 IPCA_PCT_MONTH_BOUNDS_EXCLUSIVE = (-5.0, 5.0)   # % a.m.
 IPCA_WINDOW_MONTHS = 12  # janela do acumulado em 12 meses; mínimo de observações
+IPCA_WARMUP_MONTHS = 12
 IPCA_MEDIAN_RANGE = (-1.0, 2.0)                 # mediana histórica ~0,3–0,5%
 IPCA_PCT_12M_BOUNDS = (-10.0, 30.0)             # % acumulado 12m
 IPCA_MIN_MONTHLY_COVERAGE = 0.98                # quase 100% (não há “feriados” mensais)
