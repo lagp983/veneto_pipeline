@@ -66,7 +66,7 @@ from .config import (
     SERIES_IBOV,
     SERIES_IPCA,
     SERIES_PTAX,
-    IPCA_WARMUP_MONTHS
+    IPCA_WARMUP_MONTHS,
     default_window,
 )
 from .extract import extract_cdi, extract_ibov, extract_ipca, extract_ptax
