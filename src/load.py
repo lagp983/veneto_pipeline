@@ -1,8 +1,8 @@
 """Carga das séries: tabela SQLite (replace) e CSV em ``data/``.
 
 Recebe o DataFrame já transformado. Não baixa, não limpa, não calcula.
-``load_table`` é o núcleo comum; ``load_cdi``, ``load_ptax`` e ``load_ipca``
-só fixam colunas, tabela e arquivos de cada série.
+``load_table`` é o núcleo comum; ``load_cdi``, ``load_ptax``, ``load_ipca``
+e ``load_ibov`` só fixam colunas, tabela e arquivos de cada série.
 """
 
 from __future__ import annotations
@@ -21,12 +21,16 @@ from .config import (
     COL_CDI_PCT_DAY,
     COL_CDI_PCT_YEAR,
     COL_DATE,
+    COL_IBOV_CLOSE,
+    COL_IBOV_RET_DAY,
     COL_IPCA_FACTOR_MONTH,
     COL_IPCA_PCT_12M,
     COL_IPCA_PCT_MONTH,
     COL_PTAX_RET_DAY,
     COL_PTAX_VENDA,
     DB_PATH,
+    IBOV_CSV_PATH,
+    IBOV_TABLE,
     IPCA_CSV_PATH,
     IPCA_TABLE,
     PTAX_CSV_PATH,
@@ -36,6 +40,7 @@ from .config import (
 CDI_COLUMNS = [COL_DATE, COL_CDI_PCT_DAY, COL_CDI_FACTOR_DAY, COL_CDI_PCT_YEAR]
 PTAX_COLUMNS = [COL_DATE, COL_PTAX_VENDA, COL_PTAX_RET_DAY]
 IPCA_COLUMNS = [COL_DATE, COL_IPCA_PCT_MONTH, COL_IPCA_FACTOR_MONTH, COL_IPCA_PCT_12M]
+IBOV_COLUMNS = [COL_DATE, COL_IBOV_CLOSE, COL_IBOV_RET_DAY]
 # Datas gravadas como texto ISO (YYYY-MM-DD) no SQLite e no CSV.
 DATE_FORMAT = "%Y-%m-%d"
 
@@ -85,7 +90,21 @@ def load_ipca(
     linhas gravadas.
     """
     return load_table(df, IPCA_COLUMNS, db_path, csv_path, table, label="IPCA")
-    
+
+def load_ibov(
+    df: pd.DataFrame,
+    db_path: Path | str = DB_PATH,
+    csv_path: Path | str = IBOV_CSV_PATH,
+    table: str = IBOV_TABLE,
+) -> int:
+    """Grava o IBOV transformado em SQLite (tabela substituída) e em CSV.
+
+    Mesmo banco do CDI, do PTAX e do IPCA, tabela própria: só a tabela do
+    IBOV é substituída. Veja ``load_table`` para o comportamento e os erros.
+    Devolve o número de linhas gravadas.
+    """
+    return load_table(df, IBOV_COLUMNS, db_path, csv_path, table, label="IBOV")
+
 def load_table(
     df: pd.DataFrame,
     columns: list[str],
