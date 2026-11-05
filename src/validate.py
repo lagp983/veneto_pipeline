@@ -1,12 +1,12 @@
-"""Verificações de qualidade das séries (CDI, PTAX, IPCA), da carga e entre séries.
+"""Verificações de qualidade das séries (CDI, PTAX, IPCA e IBOV), da carga e entre séries.
 
 Cada verificação devolve um ``Check`` com status OK, AVISO ou FALHA. Só FALHA
 reprova a pipeline; AVISO é informativo.
 
 - ``daily_checks``: comuns a qualquer série diária (datas, cobertura, estrutura).
 - ``monthly_checks``: comuns a qualquer série mensal (datas, cobertura, estrutura).
-- ``validate_cdi`` / ``validate_ptax`` / ``validate_ipca``: ``daily_checks`` ou
-  ``monthly_checks`` + regras de cada série.
+- ``validate_cdi`` / ``validate_ptax`` / ``validate_ipca`` / ``validate_ibov``:
+  ``daily_checks`` ou ``monthly_checks`` + regras de cada série.
 - ``validate_persisted``: relê SQLite e CSV e compara com o DataFrame gravado.
 - ``validate_date_overlap``: sobreposição de datas entre duas séries.
 """
@@ -25,12 +25,18 @@ from .config import (
     COL_CDI_PCT_DAY,
     COL_CDI_PCT_YEAR,
     COL_DATE,
+    COL_IBOV_CLOSE,
+    COL_IBOV_RET_DAY,
     COL_IPCA_FACTOR_MONTH,
     COL_IPCA_PCT_12M,
     COL_IPCA_PCT_MONTH,
     COL_PTAX_RET_DAY,
     COL_PTAX_VENDA,
     EDGE_TOLERANCE_DAYS,
+    IBOV_PRICE_BOUNDS_EXCLUSIVE,
+    IBOV_RET_FAIL_ABS_PCT,
+    IBOV_RET_WARN_ABS_PCT,
+    IBOV_TYPICAL_RANGE,
     IPCA_EDGE_TOLERANCE_MONTHS,
     IPCA_MAX_GAP_MONTHS,
     IPCA_MIN_MONTHLY_COVERAGE,
@@ -45,7 +51,7 @@ from .config import (
     PTAX_RET_WARN_ABS_PCT,
     PTAX_TYPICAL_RANGE,
 )
-from .load import CDI_COLUMNS, IPCA_COLUMNS, PTAX_COLUMNS
+from .load import CDI_COLUMNS, IPCA_COLUMNS, PTAX_COLUMNS, IBOV_COLUMNS
 from .transform import BUSINESS_DAYS_PER_YEAR
 
 OK, WARN, FAIL, SKIPPED = "OK", "AVISO", "FALHA", "PULADO"
@@ -329,8 +335,74 @@ def summarize_ptax(df: pd.DataFrame) -> list[str]:
         f"Variação do primeiro ao último valor: {change:.2f}%",
         f"Maior alta diária: {ret.max():.2f}%; maior queda diária: {ret.min():.2f}%",
     ]
+# --------------------------------------------------------------------------
+# IBOVESPA
+# --------------------------------------------------------------------------
 
+def validate_ibov(df: pd.DataFrame, start: str, end: str) -> list[Check]:
+    """Verificações sobre o DataFrame transformado do IBOV."""
+    checks = daily_checks(df, IBOV_COLUMNS, start, end)
+    if df is None or df.empty:
+        return checks
 
+    price = df[COL_IBOV_CLOSE].to_numpy(dtype="float64")
+    ret = df[COL_IBOV_RET_DAY].to_numpy(dtype="float64")
+    dates = df[COL_DATE]
+
+    lo, hi = IBOV_PRICE_BOUNDS_EXCLUSIVE
+    checks.append(_check(
+        f"ibov_close em ({lo:g}, {hi:g}) pontos",
+        bool((price > lo).all() and (price < hi).all()),
+        f"min={price.min():.2f}, max={price.max():.2f}",
+    ))
+    tlo, thi = IBOV_TYPICAL_RANGE
+    checks.append(_check(
+        "ibov_close na faixa típica",
+        bool(tlo <= price.min() and price.max() <= thi),
+        f"{price.min():.2f} a {price.max():.2f} (típico {tlo:g} a {thi:g})",
+        WARN,
+    ))
+
+    # A 1ª linha depende da observação descartada e não pode ser recalculada.
+    ref = np.expm1(np.diff(np.log(np.where(price > 0, price, np.nan)))) * 100.0
+    checks.append(_check(
+        "variação diária = p_t / p_(t-1) - 1",
+        bool(np.allclose(ret[1:], ref, rtol=1e-9, atol=1e-12)),
+        "recalculada por log/expm1 (a 1ª linha fica fora: depende da observação descartada)",
+    ))
+
+    abs_ret = np.abs(ret)
+    i = int(abs_ret.argmax())
+    max_abs = float(abs_ret[i])
+    if max_abs > IBOV_RET_FAIL_ABS_PCT:
+        status = FAIL
+    elif max_abs > IBOV_RET_WARN_ABS_PCT:
+        status = WARN
+    else:
+        status = OK
+    checks.append(Check(
+        "variação diária dentro do esperado",
+        status,
+        f"maior |variação|={max_abs:.2f}% em {dates.iloc[i]:%Y-%m-%d} "
+        f"(aviso > {IBOV_RET_WARN_ABS_PCT:g}%, falha > {IBOV_RET_FAIL_ABS_PCT:g}%)",
+    ))
+    return checks
+
+def summarize_ibov(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty:
+        return []
+    d = df[COL_DATE]
+    price = df[COL_IBOV_CLOSE]
+    ret = df[COL_IBOV_RET_DAY]
+    change = (price.iloc[-1] / price.iloc[0] - 1.0) * 100.0
+    return [
+        f"Linhas: {len(df)}",
+        f"Período efetivo: {d.min():%Y-%m-%d} a {d.max():%Y-%m-%d}",
+        f"IBOV (pontos): primeiro={price.iloc[0]:.2f}, último={price.iloc[-1]:.2f}, "
+        f"mín={price.min():.2f}, máx={price.max():.2f}",
+        f"Variação do primeiro ao último valor: {change:.2f}%",
+        f"Maior alta diária: {ret.max():.2f}%; maior queda diária: {ret.min():.2f}%",
+    ]
 # --------------------------------------------------------------------------
 # IPCA
 # --------------------------------------------------------------------------
