@@ -108,10 +108,6 @@ def _extract_values(
     Os padrões são os do CDI; PTAX, IPCA e IBOV passam a sua coluna, código
     (ou ticker, no IBOV) e rótulo.
     """
-    """Localiza a coluna de valor, converte para número e descarta NaN.
-
-    Os padrões são os do CDI; o PTAX e o IPCA passam a sua coluna, código e rótulo.
-    """
     if column in raw.columns:
         series = raw[column]
     elif str(code) in raw.columns:
