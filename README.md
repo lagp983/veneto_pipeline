@@ -86,7 +86,6 @@ Foi optado pela soluçao nao incremental, em que ao executar a pipeline novament
 Os graficos e indicadores exibem dados especificamente dos ultimos 5 anos. Nos ETLs, foram preparados alguns aspectos para permitir a escolha do periodo, porem nao foi implementado para que o dashboard altere o periodo.
 
 
-
 ### Escalabilidade
 
 As soluçoes utilizadas foram escolhidas por se tratar de um numero relativamente pequeno de dados.

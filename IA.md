@@ -527,3 +527,150 @@ Antes de considerar o suporte ao IPCA estável, recomenda-se resolver os itens
 
 
 # Relatorio Claude web 2
+# IA.md — Relatório de uso de IA (conversa de 04–05/11/2026)
+
+> **Autoria e limites.** Este relatório foi escrito pelo assistente (Claude, sessão configurada como `claude-sonnet-5-5`; o modelo que atendeu cada turno pode ter variado) a pedido da usuária, em 05/11/2026, com base apenas no histórico desta conversa. **Não foi escrito pela usuária.** Como o autor é o mesmo assistente cujo trabalho é descrito, a seção 5 é uma autoavaliação e não substitui revisão humana. O assistente não vê outras conversas, o repositório real da usuária nem o que ela executou na própria máquina; o que não aparece no histórico não está aqui. Contagens de arquivos, linhas e testes foram conferidas nos arquivos da sessão em 05/11/2026.
+
+**Contexto.** Projeto de pipeline ETL de indicadores de mercado (CDI, IPCA, dólar PTAX e Ibovespa; Python, pandas, SQLite). Nesta conversa foi planejado e implementado o dashboard em Streamlit que lê os dados do ETL. A conversa estava vinculada a um Projeto com descrição do stack e 12 documentos do ETL (`config.py`, `load.py`, `pipeline.py` etc.).
+
+## Linha do tempo (horário de Brasília)
+
+| Quando | Mensagem da usuária (resumo) | Resultado |
+|---|---|---|
+| 04/11 17:36 | Planejar o dashboard sem codificar | Plano completo (arquivos, funções, validação) e 3 perguntas de decisão |
+| 04/11 17:55 | Sem Plotly, escopo reduzido, botão de atualizar, sem extras | Plano reduzido: `__init__.py`, `app.py`, `store.py` e um arquivo de teste |
+| 04/11 23:36 | IPCA do projeto foi alterado; começar pelo `store.py` | `store.py`, `__init__.py` e 25 testes |
+| 05/11 00:05 | Seguir com o app; gráficos de base 100, perda máxima e nominal x real | `metrics.py`, `app.py`, 37 testes novos, execução com dados sintéticos |
+| 05/11 13:14 | Mesma mensagem repetida, palavra por palavra | Resumo do que já estava pronto |
+| 05/11 23:04 | Este relatório | `IA.md` |
+
+## 1. Como fui direcionada
+
+**Como a usuária conduziu o trabalho**
+
+- **Plano antes do código, pedido de forma explícita.** A primeira mensagem diz "Nao codifique ainda" e define o que o plano deve conter: "possiveis outros arquivos a criar, funçoes e suas responsabilidades e como validar".
+- **Implementação liberada em etapas curtas**, não de uma vez: primeiro o `store.py` (mensagem 3), depois o app (mensagem 4).
+- **Restrições concretas.** Organização em `src/`, app em `dashboard/app.py`, execução em Streamlit, sem Plotly, sem aumentar requisitos ("utilize funçoes ja incluidos nas bibliotecas importadas"), botão de atualização "de forma simples", sem indicadores extras, escala reduzida.
+- **Contexto do estado do projeto, informado quando mudava.** Na mensagem 3 avisou que o ETL foi alterado para o IPCA cobrir o mesmo número de datas que as outras séries.
+- **Contexto de fundo** vinha do Projeto vinculado (stack, códigos das séries, período de 5 anos, documentos do ETL). Esse material foi configurado fora das mensagens visíveis; o histórico não mostra a usuária citando os arquivos.
+- **Estilo.** Mensagens curtas e rápidas, sem acentos e com erros de digitação ("ICPA", "norminal", "dashborad", "botado"). O assistente os interpretou sem pedir confirmação.
+
+**O que as instruções não definiram** (o assistente preencheu sem perguntar; ver seção 4)
+
+- Quais séries entram na base 100, o que exatamente é "perda máxima" e como calcular "retorno real".
+- Critérios de aceitação ou exemplo de saída dos gráficos. Nenhum dado real foi fornecido.
+- Layout, cores e janelas de período.
+
+**O que o histórico não mostra**
+
+- Nenhum pedido de revisão de código ou de explicação de cálculo, e nenhum pedido para validar com dados reais. Isso descreve só esta conversa; a usuária pode ter feito essas verificações fora dela.
+- A mensagem 4 foi reenviada sem comentário às 13:14, e o motivo não está dito. O turno anterior do assistente tinha terminado com os arquivos enviados, mas sem texto de resumo (ver 5.4). O assistente tratou o reenvio como pedido de resumo e não refez o trabalho.
+
+**Resumo.** Pontos fortes observáveis: etapas curtas, plano antes do código, restrições de escopo claras e correção de rumo cedo (mensagem 2). Lacunas observáveis: termos financeiros sem definição, sem critérios de aceitação e sem validação com dados reais registrada na conversa.
+
+## 2. Pedidos principais
+
+Só há cinco pedidos distintos na conversa, então o do próprio relatório entra na lista. O reenvio das 13:14 não foi contado à parte.
+
+1. **Planejar sem codificar (04/11 17:36).** "planeje a implementaçao do dashborad que faz uso dos dados obtidos pelo ETL para exibir indicadores e graficos". Resultado: plano com 7 arquivos em `dashboard/`, 6 em `tests/` e 2 de configuração, mais três perguntas (Plotly ou Altair; botão ou só leitura; indicadores extras).
+2. **Reduzir escopo e dependências (04/11 17:55).** "nao use plotly", "evitar aumentar o numero de requisitos para funcionamento", "um botado para atualizar os dados de forma simples sera necessaria", "indicadores extras sao desnecessarios", "reduza a escala dentro do possivel". Resultado: plano em página única, sem dependências novas.
+3. **Informar a mudança do IPCA e começar pelo `store.py` (04/11 23:36).** "alteraçoes foram feitas ao projeto para que IPCA retorne a mesma quantia de data", "Começe e desenvolvimento a partir do store.py". Resultado: `store.py` (178 linhas) e 25 testes. O assistente parou aí e perguntou se podia seguir para o app, conforme a ordem do plano.
+4. **Implementar o app com três gráficos (05/11 00:05, repetido às 13:14).** "base 100, perda maxima (IBOVESPA E PTAX somente), retorno norminal vs retorno real ( ICPA sobreposto ao IBOVESPA e PTAX para indicar retorno real)". Resultado: `metrics.py` (210 linhas), `app.py` (323 linhas) e 37 testes novos (62 no total). O app foi aberto num navegador com dados sintéticos.
+5. **Este relatório (05/11 23:04):** análise honesta da conversa, em Markdown, em cinco seções.
+
+## 3. Correções e questionamentos
+
+| # | Quando | Proposta do assistente | Decisão da usuária | Motivo |
+|---|---|---|---|---|
+| 1 | 04/11 17:55 | Plotly (recomendado) ou Altair | Rejeitou Plotly; usar o que as bibliotecas já importadas oferecem | "nao e necessario algo muito elaborado"; evitar mais requisitos |
+| 2 | 04/11 17:55 | Dashboard só leitura (recomendado), ETL por linha de comando ou cron | Pediu um botão de atualização simples | Não declarado |
+| 3 | 04/11 17:55 | Perguntou se juro real, volatilidade e drawdown entrariam na 1ª versão ou na fase 2 | "indicadores extras sao desnecessarios" | Busca algo simples nesta etapa |
+| 4 | 04/11 17:55 | Plano com 7 + 6 + 2 arquivos, 4 abas, base 100 e tabelas com download | "reduza a escala dentro do possivel" | Simplicidade |
+| 5 | 04/11 23:36 | O IPCA começaria tarde (o ETL descartava 11 meses); o assistente propôs não mexer no ETL e avisar numa legenda | Alterou o ETL para o IPCA cobrir o mesmo período | Não declarado |
+| 6 | 05/11 00:05 | Como extra da fase 2, "juro real" (CDI descontado do IPCA) | Pediu em vez disso o retorno real do Ibovespa e do dólar, com o IPCA sobreposto, e perda máxima só para Ibovespa e dólar | Não declarado |
+
+Notas:
+
+- Na mensagem 2 ela escreve "Como mencionei, busco algo bem simples". A primeira mensagem desta conversa não traz esse pedido de forma explícita (pode ter sido dito em outro contexto). Em todo caso, o primeiro plano era maior do que ela queria, e a correção partiu dela.
+- Item 6: base 100, juro real e drawdown estavam entre as ideias do primeiro plano e foram adiados como "extras". Ela os pediu depois, com definições próprias, de acordo com a mensagem 3 ("posteriormente requisitarei graficos especificos").
+- **O que não houve:** nenhuma correção de código, de cálculo ou de resultado de teste. Ela não questionou a interpolação do IPCA nem a troca de `st.line_chart` por Altair; essa troca só foi informada no resumo das 13:14.
+
+## 4. Divisão das decisões
+
+### Decididas pela usuária
+
+- Estrutura: `src/` para o ETL, `dashboard/app.py` para o dashboard, Streamlit, plano antes do código.
+- Sem Plotly e sem dependências novas; botão de atualizar; sem indicadores extras; escala reduzida.
+- Alteração do ETL para o IPCA cobrir o mesmo período (feita por ela, fora da conversa).
+- Ordem do trabalho: `store.py` primeiro, app depois.
+- Os gráficos: base 100; perda máxima somente para Ibovespa e PTAX; retorno nominal x real com o IPCA sobreposto ao Ibovespa e ao PTAX.
+
+### Sugeridas pelo assistente e não contestadas
+
+Nenhum item foi aprovado explicitamente, um a um. A aceitação é inferida porque ela mandou prosseguir sem alterá-los.
+
+- Divisão em `store.py` (acesso a dados, sem Streamlit) e `app.py` (interface), com testes em `tests/`.
+- Desenho do `store.py` como estava no plano: SQLite somente leitura, variável `MARKET_DB_PATH` para os testes, `read_series`, `update_all` com import tardio de `src.pipeline` e cache invalidado pela data de modificação do banco.
+- Página única com 4 indicadores, seletor de período e botão que mostra o relatório do ETL conforme o código de saída (0, 1 ou 2).
+- Estratégia de validação: banco de teste gravado com as próprias funções `load_*` do ETL, `AppTest` do Streamlit e nenhuma chamada de rede.
+- Os 4 gráficos simples do plano reduzido (CDI, IPCA em barras, PTAX, Ibovespa) **não foram construídos**: foram substituídos pelos três gráficos que ela pediu.
+
+### Decididas pelo assistente, sem consulta prévia
+
+Estas não são "aceitas": a usuária só soube de algumas delas depois, nos resumos.
+
+- Altair no lugar de `st.line_chart` (informado só às 13:14). Na primeira captura, `st.line_chart` deixava o eixo Y começando em zero, o que espremia as séries em base 100, e mostrava os meses em inglês.
+- Novo módulo `metrics.py` e dois arquivos de teste que o plano reduzido não previa.
+- Base 100 com CDI e IPCA além de PTAX e Ibovespa, começando na primeira data comum a todos.
+- IPCA interpolado dia a dia por juros compostos, sem extrapolar além do último mês divulgado, com erro se faltar mês na tabela.
+- Retorno real = índice nominal dividido pelo índice do IPCA, em gráficos separados para Ibovespa e dólar.
+- Perda máxima = maior queda do pico anterior ao fundo dentro do período selecionado; no dólar, queda da cotação.
+- Opções de período (6 meses, 1 ano, 3 anos, Tudo; padrão Tudo), cores, legendas e textos de mensagens.
+- Exceção própria `StoreError` com mensagem legível, no lugar de `ValueError` (informado no resumo da mensagem 3).
+- Interpretar "começar pelo `store.py`" como fazer só essa etapa e pedir confirmação.
+- Dados sintéticos para os testes e para a captura de tela.
+- Não editar o `requirements.txt` (o arquivo real nem estava disponível na sessão).
+
+## 5. Pontos de atenção
+
+### 5.1 Não testado com o projeto real (o mais importante)
+
+- **`src.pipeline` nunca existiu no ambiente de teste.** `store.update_all` chama `run_all(SERIES_ALL, db_path=...)` e lê `run.exit_code` e `run.render()`. A assinatura, o significado dos códigos 0/1/2 e a afirmação de que o ETL "mantém os dados anteriores" quando reprova vêm do que o assistente descreveu do `pipeline.py` do projeto, sem execução. Os testes usam um objeto falso. No navegador, sem o módulo, o botão mostrou um erro legível (`ModuleNotFoundError`) e o app continuou funcionando.
+- **`src/config.py` e `src/load.py` foram gravados numa cópia de trabalho** (só esses dois arquivos). O histórico visível não registra de onde veio o conteúdo (o Projeto vinculado lista documentos com esses nomes), e não há como garantir que sejam idênticos aos reais. `store.py` e `metrics.py` importam nomes dessas cópias (`DB_PATH`, `*_TABLE`, `SERIES_*`, `COL_*`, `*_COLUMNS`, `DATE_FORMAT`). Se algum nome diferir no projeto real, o app falha ao abrir.
+- **Nada rodou contra o `data/market.sqlite` real.** Todos os números dos testes e da captura de tela são sintéticos, inclusive a imagem enviada.
+- **Afirmações sobre outros arquivos sem leitura registrada nesta conversa:** o descarte de 11 linhas do IPCA no `transform_ipca`, um docstring duplicado em `_extract_values` e `yfinance` duplicado no `requirements.txt`. Além disso, o assistente escreveu "o warmup que você mencionou no `pipeline.py`", mas a usuária só mencionou a alteração, não o arquivo. Conferir antes de citar.
+- **Versões.** O contêiner tinha Python 3.13.18, pandas 3.0.5 e Streamlit 1.66.1. O projeto declara Python 3.11, e o assistente não testou nessa versão nem com as versões fixadas no projeto. O `streamlit` não está no `requirements.txt` (arquivo não editado).
+- **Nada foi commitado ou enviado.** Os arquivos foram entregues como anexos; o repositório real não foi tocado.
+
+### 5.2 Interpretações financeiras para conferir
+
+- **IPCA diário é uma interpolação**, não um dado divulgado. O índice termina no 1º dia depois do último mês divulgado (com IPCA até setembro, em 01/10). Por isso o retorno real cobre um período menor que o nominal exibido nos indicadores do topo.
+- **"Retorno real" do dólar** usa só o IPCA brasileiro. É o retorno em reais do dólar descontada a inflação brasileira, não a taxa de câmbio real (que também ajustaria pela inflação dos EUA).
+- **Ibovespa** (`^BVSP`, fechamento) é índice de preço, sem dividendos. O "retorno nominal" é retorno de preço.
+- **Perda máxima** é medida só dentro do período selecionado (o pico considerado é o do período). No dólar, significa queda da cotação.
+- **CDI.** A coluna `cdi_pct_year` exibida no indicador vem pronta do ETL e a fórmula não foi conferida. A base 100 usa o fator diário do ETL.
+- **Dias sem cotação** de uma série (feriados diferentes entre as séries) repetem o último valor.
+
+### 5.3 Decisões técnicas e de escopo
+
+- **Altair** respeita a restrição de não adicionar requisitos (vem junto com o Streamlit), mas é uma interpretação de "funções já incluídas nas bibliotecas importadas" e não foi confirmada com a usuária.
+- **O botão de atualizar** roda o ETL de forma síncrona, sem trava contra duas atualizações simultâneas. `st.cache_data.clear()` limpa o cache de todas as sessões. O horário exibido na mensagem usa o relógio do servidor, que pode não estar no fuso de Brasília.
+- **Os CSVs** gravados pelo botão vão para os caminhos padrão do ETL; `MARKET_DB_PATH` só troca o banco.
+- **Os testes de interface** contam elementos pelo nome do tipo (`vega_lite_chart`), que pode mudar entre versões do Streamlit.
+
+### 5.4 Erros e falhas de comunicação durante o trabalho
+
+- Dois testes falharam por erro do próprio assistente, não do código: uma conta errada de datas em `test_align_daily_forward_fills_missing_days_but_not_the_start` e o nome do tipo de elemento do `AppTest`. Os testes foram corrigidos; o código não mudou por causa deles.
+- Na primeira captura de tela, os gráficos tinham o eixo Y começando em zero e meses em inglês. Isso levou à troca para Altair e a uma mudança nos rótulos dos indicadores (a data de referência foi para o rótulo).
+- O turno de 05/11 00:05 terminou com os arquivos enviados e sem texto de resumo; o resumo só veio no turno das 13:14.
+- Código e testes foram escritos pelo mesmo assistente, então os testes compartilham as mesmas hipóteses. Os 62 testes passando (25 + 20 + 17, reexecutados em 05/11) não validam a interpretação financeira.
+
+### 5.5 Como verificar
+
+1. Copiar `dashboard/` e `tests/` para o repositório, confirmar os nomes importados de `src.config` e `src.load` e adicionar `streamlit` ao `requirements.txt`.
+2. Rodar `python -m pytest tests/` e depois `streamlit run dashboard/app.py` na raiz do repositório.
+3. Rodar o ETL real e comparar os 4 indicadores com `SELECT ... ORDER BY date DESC LIMIT 1` direto no SQLite.
+4. Recalcular à mão, com dados reais, um retorno real (nominal dividido pelo IPCA acumulado) e a perda máxima do Ibovespa.
+5. Clicar em "Atualizar dados" com o ETL real e conferir as três mensagens (códigos 0, 1 e 2).
+
+#Demais relatorio podem ser adicionados posteriormente devido a falta de tokens
